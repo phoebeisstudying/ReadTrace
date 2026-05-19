@@ -48,6 +48,8 @@ object AutoWallpaperGenerator {
         val receiptTitleSize: Float,
         val receiptBodySize: Float,
         val footerMode: String,
+        val barcodeWidthScale: Float,
+        val barcodeGapMode: String,
         val noteText: String,
         val chartStyleMode: String,
         val showPeakLabel: Boolean,
@@ -113,6 +115,8 @@ object AutoWallpaperGenerator {
             receiptTitleSize = p.getFloat("receipt_title_size", 74f).coerceIn(24f, 120f),
             receiptBodySize = p.getFloat("receipt_body_size", 34f).coerceIn(18f, 60f),
             footerMode = p.getString("footer_mode", "NONE") ?: "NONE",
+            barcodeWidthScale = p.getFloat("barcode_width_scale", 1.0f).coerceIn(0.6f, 1.6f),
+            barcodeGapMode = p.getString("barcode_gap_mode", "STANDARD") ?: "STANDARD",
             noteText = p.getString("note_text", "") ?: "",
             chartStyleMode = p.getString("chart_style_mode", "LINE") ?: "LINE",
             showPeakLabel = p.getBoolean("show_peak_label", true),
@@ -264,7 +268,7 @@ object AutoWallpaperGenerator {
                     val decorY = qrY + s(10f)
                     val decorW = (w - decorX - s(60f)).coerceAtLeast(s(220f))
                     val decorH = (qr.height - s(20f)).toFloat().coerceAtLeast(s(60f))
-                    drawBarcodeDecor(c, decorX, decorY, decorW, decorH, s0.noteText, black)
+                    drawBarcodeDecor(c, decorX, decorY, decorW, decorH, s0.noteText, s0.barcodeWidthScale, s0.barcodeGapMode, black)
                     val textY = qrY + qr.height + s(34f)
                     c.drawText(shortTitle(s0.noteText, 36), qrX, textY, mono)
                 } else {
@@ -517,16 +521,32 @@ object AutoWallpaperGenerator {
         }.getOrNull()
     }
 
-    private fun drawBarcodeDecor(canvas: Canvas, x: Float, y: Float, width: Float, height: Float, seedText: String, paint: Paint) {
+    private fun drawBarcodeDecor(
+        canvas: Canvas,
+        x: Float,
+        y: Float,
+        width: Float,
+        height: Float,
+        seedText: String,
+        widthScale: Float,
+        gapMode: String,
+        paint: Paint
+    ) {
         val seed = seedText.hashCode().toLong()
         var state = if (seed == 0L) 1L else kotlin.math.abs(seed)
         var cursor = x
         val end = x + width
+        val gapScale = when (gapMode) {
+            "TIGHT" -> 0.75f
+            "LOOSE" -> 1.35f
+            else -> 1.0f
+        }
         while (cursor < end) {
             state = (state * 1103515245 + 12345) and 0x7fffffff
-            val barW = (1 + (state % 5)).toFloat()
             state = (state * 1103515245 + 12345) and 0x7fffffff
-            val gapW = (1 + (state % 4)).toFloat()
+            val barW = ((1 + (state % 5)).toFloat() * widthScale).coerceAtLeast(0.8f)
+            state = (state * 1103515245 + 12345) and 0x7fffffff
+            val gapW = ((1 + (state % 4)).toFloat() * gapScale).coerceAtLeast(0.6f)
             canvas.drawRect(cursor, y, (cursor + barW).coerceAtMost(end), y + height, paint)
             cursor += barW + gapW
         }

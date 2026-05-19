@@ -76,6 +76,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var topNGroup: RadioGroup
     private lateinit var timeUnitGroup: RadioGroup
     private lateinit var footerModeGroup: RadioGroup
+    private lateinit var barcodeWidthGroup: RadioGroup
+    private lateinit var barcodeGapGroup: RadioGroup
     private lateinit var chartStyleGroup: RadioGroup
     private lateinit var yAxisModeGroup: RadioGroup
     private lateinit var showPeakLabelCheck: CheckBox
@@ -153,6 +155,8 @@ class MainActivity : AppCompatActivity() {
         val receiptTitleSize: Float,
         val receiptBodySize: Float,
         val footerMode: String,
+        val barcodeWidthScale: Float,
+        val barcodeGapMode: String,
         val noteText: String,
         val chartStyleMode: ChartStyleMode,
         val showPeakLabel: Boolean,
@@ -406,6 +410,22 @@ class MainActivity : AppCompatActivity() {
             hint = "备注文本 / 条码内容"
             setText(prefs.getString("note_text", "") ?: "")
         }
+        val barcodeWidthLabel = TextView(this).apply { text = "条码粗细强度" }
+        barcodeWidthGroup = RadioGroup(this).apply {
+            orientation = RadioGroup.VERTICAL
+            val saved = prefs.getFloat("barcode_width_scale", 1.0f)
+            addView(RadioButton(context).apply { id = 3101; text = "细(0.8x)"; isChecked = saved == 0.8f })
+            addView(RadioButton(context).apply { id = 3102; text = "标准(1.0x)"; isChecked = saved != 0.8f && saved != 1.2f })
+            addView(RadioButton(context).apply { id = 3103; text = "粗(1.2x)"; isChecked = saved == 1.2f })
+        }
+        val barcodeGapLabel = TextView(this).apply { text = "条码留白密度" }
+        barcodeGapGroup = RadioGroup(this).apply {
+            orientation = RadioGroup.VERTICAL
+            val saved = prefs.getString("barcode_gap_mode", "STANDARD") ?: "STANDARD"
+            addView(RadioButton(context).apply { id = 3111; text = "紧凑"; isChecked = saved == "TIGHT" })
+            addView(RadioButton(context).apply { id = 3112; text = "标准"; isChecked = saved == "STANDARD" })
+            addView(RadioButton(context).apply { id = 3113; text = "疏松"; isChecked = saved == "LOOSE" })
+        }
         val chartStyleLabel = TextView(this).apply { text = "图表样式" }
         val chartRuleHint = TextView(this).apply {
             textSize = 12f
@@ -553,6 +573,10 @@ class MainActivity : AppCompatActivity() {
         container.addView(footerLabel)
         container.addView(footerModeGroup)
         container.addView(noteInput)
+        container.addView(barcodeWidthLabel)
+        container.addView(barcodeWidthGroup)
+        container.addView(barcodeGapLabel)
+        container.addView(barcodeGapGroup)
         container.addView(titleFontLabel)
         container.addView(titleFontSpinner)
         container.addView(bodyFontLabel)
@@ -615,6 +639,12 @@ class MainActivity : AppCompatActivity() {
             if (!isInitializingUi) applySettingsPreview()
         }
         footerModeGroup.setOnCheckedChangeListener { _, _ ->
+            if (!isInitializingUi) applySettingsPreview()
+        }
+        barcodeWidthGroup.setOnCheckedChangeListener { _, _ ->
+            if (!isInitializingUi) applySettingsPreview()
+        }
+        barcodeGapGroup.setOnCheckedChangeListener { _, _ ->
             if (!isInitializingUi) applySettingsPreview()
         }
         autoRefreshCheck.setOnCheckedChangeListener { _, _ ->
@@ -892,9 +922,19 @@ class MainActivity : AppCompatActivity() {
             else -> "NONE"
         }
         val noteText = noteInput.text.toString().trim()
+        val barcodeWidthScale = when (barcodeWidthGroup.checkedRadioButtonId) {
+            3101 -> 0.8f
+            3103 -> 1.2f
+            else -> 1.0f
+        }
+        val barcodeGapMode = when (barcodeGapGroup.checkedRadioButtonId) {
+            3111 -> "TIGHT"
+            3113 -> "LOOSE"
+            else -> "STANDARD"
+        }
         val titleFont = fontSpec(titleFontSpinner.selectedItem?.toString() ?: "SERIF_BOLD")
         val bodyFont = fontSpec(bodyFontSpinner.selectedItem?.toString() ?: "MONO")
-        return Settings(includeUnread, showChart, showProgressStatus, showAuthor, minDurationMinutes, topN, weekStart, weekEnd, periodMode, readingFilterMode, sourceMode, progressMode, timeUnit, receiptTitle, receiptTitleSize, receiptBodySize, footerMode, noteText, chartStyleMode, showPeakLabel, yAxisMode, yAxisFixedMaxMinutes, titleFont, bodyFont)
+        return Settings(includeUnread, showChart, showProgressStatus, showAuthor, minDurationMinutes, topN, weekStart, weekEnd, periodMode, readingFilterMode, sourceMode, progressMode, timeUnit, receiptTitle, receiptTitleSize, receiptBodySize, footerMode, barcodeWidthScale, barcodeGapMode, noteText, chartStyleMode, showPeakLabel, yAxisMode, yAxisFixedMaxMinutes, titleFont, bodyFont)
     }
 
     private fun saveSettings(settings: Settings) {
@@ -917,6 +957,8 @@ class MainActivity : AppCompatActivity() {
             .putFloat("receipt_title_size", settings.receiptTitleSize)
             .putFloat("receipt_body_size", settings.receiptBodySize)
             .putString("footer_mode", settings.footerMode)
+            .putFloat("barcode_width_scale", settings.barcodeWidthScale)
+            .putString("barcode_gap_mode", settings.barcodeGapMode)
             .putString("note_text", settings.noteText)
             .putString("chart_style_mode", settings.chartStyleMode.name)
             .putBoolean("show_peak_label", settings.showPeakLabel)
