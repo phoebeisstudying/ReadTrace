@@ -8,6 +8,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
@@ -15,6 +16,7 @@ import android.provider.DocumentsContract
 import android.view.View
 import android.view.ViewGroup
 import android.app.DatePickerDialog
+import android.app.TimePickerDialog
 import android.text.Editable
 import android.text.TextWatcher
 import android.widget.ArrayAdapter
@@ -66,6 +68,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var titleInput: EditText
     private lateinit var titleSizeInput: EditText
     private lateinit var bodySizeInput: EditText
+    private lateinit var serialNumberSizeInput: EditText
+    private lateinit var serialCustomInput: EditText
     private lateinit var noteInput: EditText
     private lateinit var weekStartText: TextView
     private lateinit var weekEndText: TextView
@@ -73,8 +77,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var periodGroup: RadioGroup
     private lateinit var progressModeGroup: RadioGroup
     private lateinit var readingFilterGroup: RadioGroup
-    private lateinit var topNGroup: RadioGroup
     private lateinit var timeUnitGroup: RadioGroup
+    private lateinit var wallpaperModeGroup: RadioGroup
+    private lateinit var coverFitModeGroup: RadioGroup
+    private lateinit var serialModeGroup: RadioGroup
     private lateinit var footerModeGroup: RadioGroup
     private lateinit var barcodeWidthGroup: RadioGroup
     private lateinit var barcodeGapGroup: RadioGroup
@@ -92,6 +98,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var bodyFontSpinner: Spinner
     private lateinit var fontScanText: TextView
     private lateinit var statusText: TextView
+    private lateinit var changeStateText: TextView
 
     private lateinit var settingsPage: View
     private lateinit var previewPage: View
@@ -149,11 +156,16 @@ class MainActivity : AppCompatActivity() {
         val periodMode: PeriodMode,
         val readingFilterMode: ReadingFilterMode,
         val sourceMode: DataSourceMode,
+        val wallpaperMode: String,
+        val coverFitMode: String,
         val progressMode: String,
         val timeUnit: String,
         val receiptTitle: String,
         val receiptTitleSize: Float,
         val receiptBodySize: Float,
+        val serialNumberMode: String,
+        val serialNumberCustom: String,
+        val serialNumberSize: Float,
         val footerMode: String,
         val barcodeWidthScale: Float,
         val barcodeGapMode: String,
@@ -168,7 +180,23 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        checkAllFilesAccessPermission()
         setupUi()
+    }
+
+    private fun checkAllFilesAccessPermission() {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            if (!android.os.Environment.isExternalStorageManager()) {
+                try {
+                    val intent = Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+                    intent.data = Uri.parse("package:$packageName")
+                    startActivity(intent)
+                } catch (e: Exception) {
+                    val intent = Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                    startActivity(intent)
+                }
+            }
+        }
     }
 
     override fun onResume() {
@@ -257,10 +285,24 @@ class MainActivity : AppCompatActivity() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(24, 24, 24, 24)
+            setBackgroundColor(Color.WHITE)
+        }
+        fun styleEinkButton(btn: Button) {
+            val bg = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                setColor(Color.WHITE)
+                setStroke(3, Color.BLACK)
+                cornerRadius = 6f
+            }
+            btn.background = bg
+            btn.setTextColor(Color.BLACK)
+            btn.textSize = 16f
+            btn.minHeight = 92
         }
 
         val topBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 0, 0, 10)
         }
         val btnSettings = Button(this).apply {
             text = "设置"
@@ -274,9 +316,25 @@ class MainActivity : AppCompatActivity() {
             text = "刷新预览"
             setOnClickListener { refreshPreviewData() }
         }
+        val btnGenerateWallpaper = Button(this).apply {
+            text = "生成壁纸"
+            setOnClickListener { generateAndSaveFromCurrentSettings() }
+        }
+        styleEinkButton(btnSettings)
+        styleEinkButton(btnPreview)
+        styleEinkButton(btnRefreshPreview)
+        styleEinkButton(btnGenerateWallpaper)
+        changeStateText = TextView(this).apply {
+            text = "状态: 初始化"
+            textSize = 12f
+            setPadding(20, 14, 0, 0)
+            setTextColor(Color.DKGRAY)
+        }
         topBar.addView(btnSettings)
         topBar.addView(btnPreview)
         topBar.addView(btnRefreshPreview)
+        topBar.addView(btnGenerateWallpaper)
+        topBar.addView(changeStateText)
 
         settingsPage = buildSettingsPage(prefs)
         previewPage = buildPreviewPage()
@@ -298,11 +356,111 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(12, 24, 12, 24)
         }
+        fun styleEinkButton(btn: Button) {
+            val bg = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                setColor(Color.WHITE)
+                setStroke(3, Color.BLACK)
+                cornerRadius = 6f
+            }
+            btn.background = bg
+            btn.setTextColor(Color.BLACK)
+            btn.textSize = 14f
+            btn.minHeight = 86
+        }
 
         val title = TextView(this).apply {
             text = "阅读壁纸设置"
             textSize = 24f
             setTypeface(typeface, Typeface.BOLD)
+        }
+        val sectionContents = mutableListOf<LinearLayout>()
+        fun section(
+            titleText: String,
+            desc: String,
+            defaultExpanded: Boolean,
+            onReset: (() -> Unit)? = null
+        ): Pair<LinearLayout, LinearLayout> {
+            val box = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(22, 18, 22, 18)
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    setMargins(0, 0, 0, 14)
+                }
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    setColor(Color.WHITE)
+                    setStroke(3, Color.BLACK)
+                    cornerRadius = 8f
+                }
+            }
+            val headerRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+            }
+            val header = TextView(this).apply {
+                text = titleText
+                textSize = 18f
+                setTypeface(typeface, Typeface.BOLD)
+            }
+            val resetBtn = Button(this).apply {
+                text = "重置本组"
+                visibility = if (onReset == null) View.GONE else View.VISIBLE
+                setOnClickListener { onReset?.invoke() }
+            }
+            styleEinkButton(resetBtn)
+            headerRow.addView(header, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            headerRow.addView(resetBtn)
+            box.addView(headerRow)
+            box.addView(TextView(this).apply {
+                text = desc
+                textSize = 11f
+                setTextColor(Color.DKGRAY)
+            })
+            val content = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, 10, 0, 0)
+            }
+            box.addView(content)
+            sectionContents.add(content)
+            var expanded = defaultExpanded
+            header.setOnClickListener {
+                expanded = !expanded
+                content.visibility = if (expanded) View.VISIBLE else View.GONE
+                header.text = if (expanded) "$titleText  ▾" else "$titleText  ▸"
+            }
+            header.text = "$titleText  ▾"
+            content.visibility = if (expanded) View.VISIBLE else View.GONE
+            if (!expanded) header.text = "$titleText  ▸"
+            return box to content
+        }
+        fun numberControl(label: String, target: EditText, min: Int, max: Int): LinearLayout {
+            val wrap = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            wrap.addView(TextView(this).apply { text = label })
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            val minus = Button(this).apply { text = "-" }
+            val plus = Button(this).apply { text = "+" }
+            styleEinkButton(minus)
+            styleEinkButton(plus)
+            val value = TextView(this).apply {
+                textSize = 18f
+                setTypeface(typeface, Typeface.BOLD)
+                setPadding(24, 8, 24, 8)
+                setTextColor(Color.BLACK)
+            }
+            fun setValue(v: Int) {
+                val nv = v.coerceIn(min, max)
+                target.setText(nv.toString())
+                value.text = nv.toString()
+            }
+            val initial = target.text.toString().trim().toIntOrNull()?.coerceIn(min, max) ?: min
+            setValue(initial)
+            minus.setOnClickListener { setValue((target.text.toString().toIntOrNull() ?: initial) - 1) }
+            plus.setOnClickListener { setValue((target.text.toString().toIntOrNull() ?: initial) + 1) }
+            row.addView(minus)
+            row.addView(value, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            row.addView(plus)
+            wrap.addView(row)
+            return wrap
         }
 
         includeUnreadCheck = CheckBox(this).apply {
@@ -363,6 +521,21 @@ class MainActivity : AppCompatActivity() {
             addView(RadioButton(context).apply { id = 1002; text = "按有路径会话"; isChecked = saved == DataSourceMode.PATH_SESSION.name })
             addView(RadioButton(context).apply { id = 1003; text = "按Metadata最近访问"; isChecked = saved == DataSourceMode.METADATA_ACCESS.name })
         }
+        val wallpaperModeLabel = TextView(this).apply { text = "壁纸类型" }
+        wallpaperModeGroup = RadioGroup(this).apply {
+            orientation = RadioGroup.VERTICAL
+            val saved = prefs.getString("wallpaper_mode", "STATS") ?: "STATS"
+            addView(RadioButton(context).apply { id = 1201; text = "统计壁纸"; isChecked = saved == "STATS" })
+            addView(RadioButton(context).apply { id = 1202; text = "当前阅读封面(实验性,较耗电)"; isChecked = saved == "COVER" })
+            addView(RadioButton(context).apply { id = 1203; text = "自动(熄屏优先封面)(实验性,较耗电)"; isChecked = saved == "AUTO_COVER" })
+        }
+        val coverFitModeLabel = TextView(this).apply { text = "封面显示方式" }
+        coverFitModeGroup = RadioGroup(this).apply {
+            orientation = RadioGroup.HORIZONTAL
+            val saved = prefs.getString("cover_fit_mode", "FIT") ?: "FIT"
+            addView(RadioButton(context).apply { id = 1211; text = "完整显示"; isChecked = saved == "FIT" })
+            addView(RadioButton(context).apply { id = 1212; text = "铺满裁切"; isChecked = saved == "CROP" })
+        }
 
         val minDurationLabel = TextView(this).apply {
             text = "最小时长阈值（分钟，作用于“按阅读时长事件”）"
@@ -371,16 +544,10 @@ class MainActivity : AppCompatActivity() {
             hint = "例如 1"
             setText(prefs.getInt("min_duration_minutes", 1).toString())
         }
-        val topNLabel = TextView(this).apply { text = "Top N" }
-        topNGroup = RadioGroup(this).apply {
-            orientation = RadioGroup.HORIZONTAL
-            val savedN = prefs.getInt("top_n", 5).coerceAtMost(5)
-            addView(RadioButton(context).apply { id = 5003; text = "3"; isChecked = savedN == 3 })
-            addView(RadioButton(context).apply { id = 5005; text = "5"; isChecked = savedN == 5 })
-        }
+        val topNLabel = TextView(this).apply { text = "Top N（最多显示书籍数量）" }
         topNInput = EditText(this).apply {
-            hint = "自定义TopN(1-5,可空)"
-            setText("")
+            hint = "TopN(1-5)"
+            setText(prefs.getInt("top_n", 5).coerceIn(1, 5).toString())
         }
         val readingFilterLabel = TextView(this).apply { text = "书单筛选（状态）" }
         readingFilterGroup = RadioGroup(this).apply {
@@ -397,6 +564,22 @@ class MainActivity : AppCompatActivity() {
             val saved = prefs.getString("time_unit", "HOUR") ?: "HOUR"
             addView(RadioButton(context).apply { id = 2001; text = "小时"; isChecked = saved == "HOUR" })
             addView(RadioButton(context).apply { id = 2002; text = "分钟"; isChecked = saved == "MINUTE" })
+        }
+        val serialModeLabel = TextView(this).apply { text = "单号数字模式" }
+        serialModeGroup = RadioGroup(this).apply {
+            orientation = RadioGroup.HORIZONTAL
+            val saved = prefs.getString("serial_number_mode", "DATE") ?: "DATE"
+            addView(RadioButton(context).apply { id = 2011; text = "月日"; isChecked = saved == "DATE" })
+            addView(RadioButton(context).apply { id = 2012; text = "随机"; isChecked = saved == "RANDOM" })
+            addView(RadioButton(context).apply { id = 2013; text = "自定义"; isChecked = saved == "CUSTOM" })
+        }
+        serialCustomInput = EditText(this).apply {
+            hint = "自定义数字(1-12位)"
+            setText(prefs.getString("serial_number_custom", "") ?: "")
+        }
+        serialNumberSizeInput = EditText(this).apply {
+            hint = "单号数字字号(24-140)"
+            setText((prefs.getFloat("serial_number_size", 46f)).toInt().toString())
         }
         val footerLabel = TextView(this).apply { text = "底部备注/条码" }
         footerModeGroup = RadioGroup(this).apply {
@@ -465,8 +648,11 @@ class MainActivity : AppCompatActivity() {
             addView(RadioButton(context).apply { id = 8002; text = "熄屏触发（更实时，较耗电）"; isChecked = saved == AutoRefreshConfig.MODE_SCREEN_OFF })
         }
         autoDailyTimeInput = EditText(this).apply {
-            hint = "每日执行时间，例如 22:30"
+            hint = "每日执行时间"
             setText(prefs.getString(AutoRefreshConfig.KEY_DAILY_TIME, "22:30") ?: "22:30")
+            isFocusable = false
+            isClickable = true
+            setOnClickListener { openDailyTimePicker() }
         }
         autoMinIntervalInput = EditText(this).apply {
             hint = "熄屏触发最小间隔(分钟, 1-240)"
@@ -496,6 +682,7 @@ class MainActivity : AppCompatActivity() {
             text = "选择字体目录（SAF）"
             setOnClickListener { pickFontTreeLauncher.launch(null) }
         }
+        styleEinkButton(pickFontDirBtn)
         fontScanText = TextView(this).apply {
             textSize = 12f
             text = fontScanReport
@@ -516,15 +703,12 @@ class MainActivity : AppCompatActivity() {
             text = "选择起始日期"
             setOnClickListener { openWeekStartDatePicker() }
         }
+        styleEinkButton(weekPickerBtn)
         val weekEndPickerBtn = Button(this).apply {
             text = "选择结束日期"
             setOnClickListener { openWeekEndDatePicker() }
         }
-
-        val generateButton = Button(this).apply {
-            text = "生成并覆盖壁纸文件"
-            setOnClickListener { generateAndSaveFromCurrentSettings() }
-        }
+        styleEinkButton(weekEndPickerBtn)
 
         statusText = TextView(this).apply {
             text = "设置后点击按钮生成。"
@@ -532,63 +716,149 @@ class MainActivity : AppCompatActivity() {
         }
 
         container.addView(title)
-        container.addView(periodLabel)
-        container.addView(periodGroup)
-        container.addView(includeUnreadCheck)
-        container.addView(titleInput)
-        container.addView(titleSizeLabel)
-        container.addView(titleSizeInput)
-        container.addView(bodySizeLabel)
-        container.addView(bodySizeInput)
-        container.addView(showProgressStatusCheck)
-        container.addView(progressModeLabel)
-        container.addView(progressModeGroup)
-        container.addView(showAuthorCheck)
-        container.addView(showChartCheck)
-        container.addView(sourceLabel)
-        container.addView(sourceGroup)
-        container.addView(minDurationLabel)
-        container.addView(minDurationInput)
-        container.addView(readingFilterLabel)
-        container.addView(readingFilterGroup)
-        container.addView(topNLabel)
-        container.addView(topNGroup)
-        container.addView(topNInput)
-        container.addView(timeUnitLabel)
-        container.addView(timeUnitGroup)
-        container.addView(chartStyleLabel)
-        container.addView(chartRuleHint)
-        container.addView(chartStyleGroup)
-        container.addView(showPeakLabelCheck)
-        container.addView(yAxisModeLabel)
-        container.addView(yAxisModeGroup)
-        container.addView(yAxisMaxInput)
-        container.addView(autoSectionLabel)
-        container.addView(autoRefreshCheck)
-        container.addView(autoModeGroup)
-        container.addView(autoDailyTimeInput)
-        container.addView(autoMinIntervalInput)
-        container.addView(autoModeHintText)
-        container.addView(autoWarningText)
-        container.addView(footerLabel)
-        container.addView(footerModeGroup)
-        container.addView(noteInput)
-        container.addView(barcodeWidthLabel)
-        container.addView(barcodeWidthGroup)
-        container.addView(barcodeGapLabel)
-        container.addView(barcodeGapGroup)
-        container.addView(titleFontLabel)
-        container.addView(titleFontSpinner)
-        container.addView(bodyFontLabel)
-        container.addView(bodyFontSpinner)
-        container.addView(pickFontDirBtn)
-        container.addView(fontScanText)
-        container.addView(weekLabel)
-        container.addView(weekStartText)
-        container.addView(weekEndText)
-        container.addView(weekPickerBtn)
-        container.addView(weekEndPickerBtn)
-        container.addView(generateButton)
+        val foldRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val btnExpandAll = Button(this).apply {
+            text = "全部展开"
+            setOnClickListener {
+                sectionContents.forEach { it.visibility = View.VISIBLE }
+            }
+        }
+        styleEinkButton(btnExpandAll)
+        val btnCollapseAll = Button(this).apply {
+            text = "全部收起"
+            setOnClickListener {
+                sectionContents.forEach { it.visibility = View.GONE }
+            }
+        }
+        styleEinkButton(btnCollapseAll)
+        foldRow.addView(btnExpandAll)
+        foldRow.addView(btnCollapseAll)
+        container.addView(foldRow)
+
+        val (secDataBox, secData) = section("数据与统计", "周期、数据口径、时长单位与日期范围", true, onReset = {
+            periodGroup.check(4001)
+            sourceGroup.check(1001)
+            wallpaperModeGroup.check(1201)
+            coverFitModeGroup.check(1211)
+            timeUnitGroup.check(2001)
+            selectedWeekStartYmd = currentWeekStartYmd()
+            selectedWeekEndYmd = currentWeekEndYmd()
+            weekStartText.text = selectedWeekStartYmd
+            weekEndText.text = selectedWeekEndYmd
+            applySettingsPreview()
+        })
+        secData.addView(periodLabel); secData.addView(periodGroup); secData.addView(sourceLabel); secData.addView(sourceGroup)
+        secData.addView(wallpaperModeLabel); secData.addView(wallpaperModeGroup); secData.addView(coverFitModeLabel); secData.addView(coverFitModeGroup)
+        secData.addView(timeUnitLabel); secData.addView(timeUnitGroup); secData.addView(weekLabel); secData.addView(weekStartText)
+        secData.addView(weekEndText); secData.addView(weekPickerBtn); secData.addView(weekEndPickerBtn); container.addView(secDataBox)
+
+        val (secFilterBox, secFilter) = section("书单筛选", "控制展示书目与统计阈值", true, onReset = {
+            includeUnreadCheck.isChecked = false
+            readingFilterGroup.check(6001)
+            topNInput.setText("5")
+            minDurationInput.setText("1")
+            applySettingsPreview()
+        })
+        secFilter.addView(includeUnreadCheck); secFilter.addView(readingFilterLabel); secFilter.addView(readingFilterGroup)
+        secFilter.addView(topNLabel); secFilter.addView(numberControl("Top N", topNInput, 1, 5))
+        secFilter.addView(minDurationLabel); secFilter.addView(numberControl("最小时长(分钟)", minDurationInput, 0, 240)); container.addView(secFilterBox)
+
+        val (secLayoutBox, secLayout) = section("排版与字体", "标题、字号、进度与字体", true, onReset = {
+            titleInput.setText("阅读账单")
+            titleSizeInput.setText("74")
+            bodySizeInput.setText("34")
+            serialModeGroup.check(2011)
+            serialCustomInput.setText("")
+            serialNumberSizeInput.setText("46")
+            showProgressStatusCheck.isChecked = true
+            progressModeGroup.check(6101)
+            showAuthorCheck.isChecked = true
+            applySettingsPreview()
+        })
+        secLayout.addView(titleInput); secLayout.addView(numberControl("标题字号", titleSizeInput, 24, 120)); secLayout.addView(numberControl("正文字号", bodySizeInput, 18, 60))
+        secLayout.addView(serialModeLabel); secLayout.addView(serialModeGroup); secLayout.addView(serialCustomInput); secLayout.addView(numberControl("单号数字字号", serialNumberSizeInput, 24, 140))
+        secLayout.addView(showProgressStatusCheck); secLayout.addView(progressModeLabel); secLayout.addView(progressModeGroup); secLayout.addView(showAuthorCheck)
+        secLayout.addView(titleFontLabel); secLayout.addView(titleFontSpinner); secLayout.addView(bodyFontLabel); secLayout.addView(bodyFontSpinner)
+        secLayout.addView(pickFontDirBtn); secLayout.addView(fontScanText); container.addView(secLayoutBox)
+
+        val (secChartBox, secChart) = section("图表", "图形样式与坐标设置", false, onReset = {
+            showChartCheck.isChecked = true
+            chartStyleGroup.check(7001)
+            showPeakLabelCheck.isChecked = true
+            yAxisModeGroup.check(7101)
+            yAxisMaxInput.setText("300")
+            applySettingsPreview()
+        })
+        val yAxisFixedControl = numberControl("Y轴固定最大值(分钟)", yAxisMaxInput, 1, 2000)
+        secChart.addView(showChartCheck); secChart.addView(chartStyleLabel); secChart.addView(chartRuleHint); secChart.addView(chartStyleGroup)
+        secChart.addView(showPeakLabelCheck); secChart.addView(yAxisModeLabel); secChart.addView(yAxisModeGroup); secChart.addView(yAxisFixedControl); container.addView(secChartBox)
+
+        val (secFooterBox, secFooter) = section("底部备注与条码", "备注文本与装饰条码参数", false, onReset = {
+            footerModeGroup.check(3001)
+            noteInput.setText("")
+            barcodeWidthGroup.check(3102)
+            barcodeGapGroup.check(3112)
+            applySettingsPreview()
+        })
+        secFooter.addView(footerLabel); secFooter.addView(footerModeGroup); secFooter.addView(noteInput)
+        secFooter.addView(barcodeWidthLabel); secFooter.addView(barcodeWidthGroup); secFooter.addView(barcodeGapLabel); secFooter.addView(barcodeGapGroup); container.addView(secFooterBox)
+
+        val (secAutoBox, secAuto) = section("自动刷新", "默认自动模式，可切换定时或熄屏触发", false, onReset = {
+            autoRefreshCheck.isChecked = true
+            autoModeGroup.check(8001)
+            autoDailyTimeInput.setText("22:30")
+            autoMinIntervalInput.setText("3")
+            applySettingsPreview()
+        })
+        val autoMinIntervalControl = numberControl("熄屏最小间隔(分钟)", autoMinIntervalInput, 1, 240)
+        secAuto.addView(autoSectionLabel); secAuto.addView(autoRefreshCheck); secAuto.addView(autoModeGroup); secAuto.addView(autoDailyTimeInput)
+        secAuto.addView(autoMinIntervalControl); secAuto.addView(autoModeHintText); secAuto.addView(autoWarningText); container.addView(secAutoBox)
+
+        fun updateConditionalVisibility() {
+            val showChart = showChartCheck.isChecked
+            chartStyleLabel.visibility = if (showChart) View.VISIBLE else View.GONE
+            chartRuleHint.visibility = if (showChart) View.VISIBLE else View.GONE
+            chartStyleGroup.visibility = if (showChart) View.VISIBLE else View.GONE
+            showPeakLabelCheck.visibility = if (showChart) View.VISIBLE else View.GONE
+            yAxisModeLabel.visibility = if (showChart) View.VISIBLE else View.GONE
+            yAxisModeGroup.visibility = if (showChart) View.VISIBLE else View.GONE
+            yAxisFixedControl.visibility = if (showChart && yAxisModeGroup.checkedRadioButtonId == 7102) View.VISIBLE else View.GONE
+
+            val customPeriod = periodGroup.checkedRadioButtonId == 4005
+            weekLabel.visibility = if (customPeriod) View.VISIBLE else View.GONE
+            weekStartText.visibility = if (customPeriod) View.VISIBLE else View.GONE
+            weekEndText.visibility = if (customPeriod) View.VISIBLE else View.GONE
+            weekPickerBtn.visibility = if (customPeriod) View.VISIBLE else View.GONE
+            weekEndPickerBtn.visibility = if (customPeriod) View.VISIBLE else View.GONE
+
+            val footerVisible = footerModeGroup.checkedRadioButtonId != 3001
+            noteInput.visibility = if (footerVisible) View.VISIBLE else View.GONE
+            barcodeWidthLabel.visibility = if (footerModeGroup.checkedRadioButtonId == 3003) View.VISIBLE else View.GONE
+            barcodeWidthGroup.visibility = if (footerModeGroup.checkedRadioButtonId == 3003) View.VISIBLE else View.GONE
+            barcodeGapLabel.visibility = if (footerModeGroup.checkedRadioButtonId == 3003) View.VISIBLE else View.GONE
+            barcodeGapGroup.visibility = if (footerModeGroup.checkedRadioButtonId == 3003) View.VISIBLE else View.GONE
+
+            val autoEnabled = autoRefreshCheck.isChecked
+            autoModeGroup.visibility = if (autoEnabled) View.VISIBLE else View.GONE
+            autoDailyTimeInput.visibility = if (autoEnabled && autoModeGroup.checkedRadioButtonId == 8001) View.VISIBLE else View.GONE
+            autoMinIntervalControl.visibility = if (autoEnabled && autoModeGroup.checkedRadioButtonId == 8002) View.VISIBLE else View.GONE
+            autoModeHintText.visibility = if (autoEnabled) View.VISIBLE else View.GONE
+            autoWarningText.visibility = if (autoEnabled) View.VISIBLE else View.GONE
+
+            serialCustomInput.visibility = if (serialModeGroup.checkedRadioButtonId == 2013) View.VISIBLE else View.GONE
+            val coverOptsVisible = wallpaperModeGroup.checkedRadioButtonId != 1201
+            coverFitModeGroup.visibility = if (coverOptsVisible) View.VISIBLE else View.GONE
+        }
+        showChartCheck.setOnCheckedChangeListener { _, _ -> updateConditionalVisibility(); if (!isInitializingUi) applySettingsPreview() }
+        periodGroup.setOnCheckedChangeListener { _, _ -> updateConditionalVisibility(); if (!isInitializingUi) applySettingsPreview() }
+        yAxisModeGroup.setOnCheckedChangeListener { _, _ -> updateConditionalVisibility(); if (!isInitializingUi) applySettingsPreview() }
+        footerModeGroup.setOnCheckedChangeListener { _, _ -> updateConditionalVisibility(); if (!isInitializingUi) applySettingsPreview() }
+        autoRefreshCheck.setOnCheckedChangeListener { _, _ -> updateConditionalVisibility(); if (!isInitializingUi) applySettingsPreview() }
+        autoModeGroup.setOnCheckedChangeListener { _, _ -> updateConditionalVisibility(); if (!isInitializingUi) applySettingsPreview() }
+        serialModeGroup.setOnCheckedChangeListener { _, _ -> updateConditionalVisibility(); if (!isInitializingUi) applySettingsPreview() }
+        wallpaperModeGroup.setOnCheckedChangeListener { _, _ -> updateConditionalVisibility(); if (!isInitializingUi) applySettingsPreview() }
+        updateConditionalVisibility()
+
         container.addView(statusText)
 
         updateAutoRefreshHint()
@@ -608,16 +878,13 @@ class MainActivity : AppCompatActivity() {
         showAuthorCheck.setOnCheckedChangeListener { _, _ ->
             if (!isInitializingUi) applySettingsPreview()
         }
-        showChartCheck.setOnCheckedChangeListener { _, _ ->
-            if (!isInitializingUi) applySettingsPreview()
-        }
         showPeakLabelCheck.setOnCheckedChangeListener { _, _ ->
             if (!isInitializingUi) applySettingsPreview()
         }
         sourceGroup.setOnCheckedChangeListener { _, _ ->
             if (!isInitializingUi) applySettingsPreview()
         }
-        periodGroup.setOnCheckedChangeListener { _, _ ->
+        coverFitModeGroup.setOnCheckedChangeListener { _, _ ->
             if (!isInitializingUi) applySettingsPreview()
         }
         readingFilterGroup.setOnCheckedChangeListener { _, _ ->
@@ -626,31 +893,16 @@ class MainActivity : AppCompatActivity() {
         progressModeGroup.setOnCheckedChangeListener { _, _ ->
             if (!isInitializingUi) applySettingsPreview()
         }
-        topNGroup.setOnCheckedChangeListener { _, _ ->
-            if (!isInitializingUi) applySettingsPreview()
-        }
         timeUnitGroup.setOnCheckedChangeListener { _, _ ->
             if (!isInitializingUi) applySettingsPreview()
         }
         chartStyleGroup.setOnCheckedChangeListener { _, _ ->
             if (!isInitializingUi) applySettingsPreview()
         }
-        yAxisModeGroup.setOnCheckedChangeListener { _, _ ->
-            if (!isInitializingUi) applySettingsPreview()
-        }
-        footerModeGroup.setOnCheckedChangeListener { _, _ ->
-            if (!isInitializingUi) applySettingsPreview()
-        }
         barcodeWidthGroup.setOnCheckedChangeListener { _, _ ->
             if (!isInitializingUi) applySettingsPreview()
         }
         barcodeGapGroup.setOnCheckedChangeListener { _, _ ->
-            if (!isInitializingUi) applySettingsPreview()
-        }
-        autoRefreshCheck.setOnCheckedChangeListener { _, _ ->
-            if (!isInitializingUi) applySettingsPreview()
-        }
-        autoModeGroup.setOnCheckedChangeListener { _, _ ->
             if (!isInitializingUi) applySettingsPreview()
         }
         titleFontSpinner.setOnItemSelectedListener(SimpleItemSelectedListener { if (!isInitializingUi) applySettingsPreview() })
@@ -697,6 +949,20 @@ class MainActivity : AppCompatActivity() {
             }
             override fun afterTextChanged(s: Editable?) {}
         })
+        serialNumberSizeInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                if (!isInitializingUi) applySettingsPreview()
+            }
+            override fun afterTextChanged(s: Editable?) {}
+        })
+        serialCustomInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                if (!isInitializingUi) applySettingsPreview()
+            }
+            override fun afterTextChanged(s: Editable?) {}
+        })
         yAxisMaxInput.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
@@ -727,6 +993,7 @@ class MainActivity : AppCompatActivity() {
         val (bmp, result) = renderWallpaperPreview(settings)
         previewBitmap = bmp
         statusText.text = "预览已更新（未写入文件）\n$result"
+        changeStateText.text = "状态: 参数已变更（仅预览）"
         refreshPreview()
         writeDebugLog("preview_updated")
     }
@@ -769,6 +1036,23 @@ class MainActivity : AppCompatActivity() {
         ).show()
     }
 
+    private fun openDailyTimePicker() {
+        val raw = autoDailyTimeInput.text.toString().trim()
+        val parts = raw.split(":")
+        val hour = parts.getOrNull(0)?.toIntOrNull()?.coerceIn(0, 23) ?: 22
+        val minute = parts.getOrNull(1)?.toIntOrNull()?.coerceIn(0, 59) ?: 30
+        TimePickerDialog(
+            this,
+            { _, h, m ->
+                autoDailyTimeInput.setText(String.format(Locale.US, "%02d:%02d", h, m))
+                if (!isInitializingUi) applySettingsPreview()
+            },
+            hour,
+            minute,
+            true
+        ).show()
+    }
+
     private fun generateAndSaveFromCurrentSettings() {
         val settings = readSettingsFromUi()
         saveSettings(settings)
@@ -778,6 +1062,7 @@ class MainActivity : AppCompatActivity() {
         val saved = saveBitmapToPictures(bmp)
         lastSavedPath = saved
         statusText.text = "已生成并覆盖文件\n$result\n路径: $saved"
+        changeStateText.text = "状态: 已生成并保存"
         refreshPreview()
         showPreviewPage()
         writeDebugLog("generated_saved")
@@ -851,8 +1136,56 @@ class MainActivity : AppCompatActivity() {
 
     private fun refreshPreviewData() {
         applySettingsPreview()
+        collectMetadataDebugSample()
         writeDebugLog("manual_refresh_preview")
         showPreviewPage()
+    }
+
+    private fun collectMetadataDebugSample() {
+        runCatching {
+            val maxRows = 30
+            val rows = StringBuilder()
+            contentResolver.query(metadataUri, null, null, null, "lastAccess DESC")?.use { c ->
+                metadataDebugReport = "columns=${c.columnNames.joinToString(",")} count=${c.count}"
+                var row = 0
+                while (row < maxRows && c.moveToNext()) {
+                    row++
+                    fun col(name: String): String {
+                        val i = c.getColumnIndex(name)
+                        if (i < 0 || c.isNull(i)) return ""
+                        return runCatching { c.getString(i) ?: "" }.getOrDefault("")
+                    }
+                    val title = col("title")
+                    val path = col("nativeAbsolutePath")
+                    val status = col("readingStatus")
+                    val author = col("authors").ifBlank { col("author") }
+                    val coverVals = listOf("coverPath", "cover", "coverUri", "thumbnail", "thumbnailPath", "bookCoverPath", "frontCoverPath", "coverUrl", "cover_url")
+                        .mapNotNull { k ->
+                            val v = col(k)
+                            if (v.isBlank()) null else "$k=${v.take(120)}"
+                        }
+                    rows.append("row=").append(row)
+                        .append(" title=").append(title.take(80))
+                        .append(" status=").append(status.ifBlank { "?" })
+                        .append(" author=").append(author.take(40))
+                        .append(" ext=").append(File(path).extension.lowercase(Locale.ROOT))
+                        .append(" path=").append(path.take(160))
+                        .append('\n')
+                    if (coverVals.isEmpty()) {
+                        rows.append("  coverCandidates=<empty>\n")
+                    } else {
+                        rows.append("  coverCandidates=").append(coverVals.joinToString(" | ")).append('\n')
+                    }
+                }
+            } ?: run {
+                metadataDebugReport = "query=null"
+                rows.append("<query returned null>")
+            }
+            metadataRowsDebugReport = rows.toString().ifBlank { "<empty>" }
+        }.onFailure {
+            metadataDebugReport = "error=${it.javaClass.simpleName}:${it.message}"
+            metadataRowsDebugReport = "<error>"
+        }
     }
 
     private fun refreshPreview() {
@@ -872,8 +1205,7 @@ class MainActivity : AppCompatActivity() {
         val showProgressStatus = showProgressStatusCheck.isChecked
         val showAuthor = showAuthorCheck.isChecked
         val minDurationMinutes = minDurationInput.text.toString().trim().toIntOrNull()?.coerceAtLeast(0) ?: 1
-        val topN = (topNInput.text.toString().trim().toIntOrNull()?.coerceIn(1, 5))
-            ?: when (topNGroup.checkedRadioButtonId) { 5003 -> 3; else -> 5 }
+        val topN = topNInput.text.toString().trim().toIntOrNull()?.coerceIn(1, 5) ?: 5
         val weekStart = selectedWeekStartYmd.ifBlank { currentWeekStartYmd() }
         val weekEnd = selectedWeekEndYmd.ifBlank { currentWeekEndYmd() }
         val periodMode = when (periodGroup.checkedRadioButtonId) {
@@ -895,6 +1227,15 @@ class MainActivity : AppCompatActivity() {
             1003 -> DataSourceMode.METADATA_ACCESS
             else -> DataSourceMode.DURATION
         }
+        val wallpaperMode = when (wallpaperModeGroup.checkedRadioButtonId) {
+            1202 -> "COVER"
+            1203 -> "AUTO_COVER"
+            else -> "STATS"
+        }
+        val coverFitMode = when (coverFitModeGroup.checkedRadioButtonId) {
+            1212 -> "CROP"
+            else -> "FIT"
+        }
         val progressMode = when (progressModeGroup.checkedRadioButtonId) {
             6102 -> "PERCENT"
             else -> "PAGES"
@@ -903,6 +1244,14 @@ class MainActivity : AppCompatActivity() {
             2002 -> "MINUTE"
             else -> "HOUR"
         }
+        val serialNumberMode = when (serialModeGroup.checkedRadioButtonId) {
+            2012 -> "RANDOM"
+            2013 -> "CUSTOM"
+            else -> "DATE"
+        }
+        val serialNumberCustomRaw = serialCustomInput.text.toString().trim()
+        val serialNumberCustom = serialNumberCustomRaw.filter { it.isDigit() }.take(12)
+        val serialNumberSize = serialNumberSizeInput.text.toString().trim().toFloatOrNull()?.coerceIn(24f, 140f) ?: 46f
         val receiptTitle = titleInput.text.toString().ifBlank { "阅读账单" }
         val receiptTitleSize = titleSizeInput.text.toString().trim().toFloatOrNull()?.coerceIn(24f, 120f) ?: 74f
         val receiptBodySize = bodySizeInput.text.toString().trim().toFloatOrNull()?.coerceIn(18f, 60f) ?: 34f
@@ -934,7 +1283,7 @@ class MainActivity : AppCompatActivity() {
         }
         val titleFont = fontSpec(titleFontSpinner.selectedItem?.toString() ?: "SERIF_BOLD")
         val bodyFont = fontSpec(bodyFontSpinner.selectedItem?.toString() ?: "MONO")
-        return Settings(includeUnread, showChart, showProgressStatus, showAuthor, minDurationMinutes, topN, weekStart, weekEnd, periodMode, readingFilterMode, sourceMode, progressMode, timeUnit, receiptTitle, receiptTitleSize, receiptBodySize, footerMode, barcodeWidthScale, barcodeGapMode, noteText, chartStyleMode, showPeakLabel, yAxisMode, yAxisFixedMaxMinutes, titleFont, bodyFont)
+        return Settings(includeUnread, showChart, showProgressStatus, showAuthor, minDurationMinutes, topN, weekStart, weekEnd, periodMode, readingFilterMode, sourceMode, wallpaperMode, coverFitMode, progressMode, timeUnit, receiptTitle, receiptTitleSize, receiptBodySize, serialNumberMode, serialNumberCustom, serialNumberSize, footerMode, barcodeWidthScale, barcodeGapMode, noteText, chartStyleMode, showPeakLabel, yAxisMode, yAxisFixedMaxMinutes, titleFont, bodyFont)
     }
 
     private fun saveSettings(settings: Settings) {
@@ -951,11 +1300,16 @@ class MainActivity : AppCompatActivity() {
             .putString("period_mode", settings.periodMode.name)
             .putString("reading_filter_mode", settings.readingFilterMode.name)
             .putString("source_mode", settings.sourceMode.name)
+            .putString("wallpaper_mode", settings.wallpaperMode)
+            .putString("cover_fit_mode", settings.coverFitMode)
             .putString("progress_mode", settings.progressMode)
             .putString("time_unit", settings.timeUnit)
             .putString("receipt_title", settings.receiptTitle)
             .putFloat("receipt_title_size", settings.receiptTitleSize)
             .putFloat("receipt_body_size", settings.receiptBodySize)
+            .putString("serial_number_mode", settings.serialNumberMode)
+            .putString("serial_number_custom", settings.serialNumberCustom)
+            .putFloat("serial_number_size", settings.serialNumberSize)
             .putString("footer_mode", settings.footerMode)
             .putFloat("barcode_width_scale", settings.barcodeWidthScale)
             .putString("barcode_gap_mode", settings.barcodeGapMode)
@@ -1079,6 +1433,13 @@ class MainActivity : AppCompatActivity() {
         if (!dir.exists()) dir.mkdirs()
         val file = File(dir, "neoreader_wallpaper.png")
         FileOutputStream(file).use { out -> bitmap.compress(Bitmap.CompressFormat.PNG, 100, out) }
+        runCatching {
+            android.media.MediaScannerConnection.scanFile(
+                this,
+                arrayOf(file.absolutePath),
+                arrayOf("image/png")
+            ) { _, _ -> }
+        }
         return file.absolutePath
     }
 
@@ -1100,11 +1461,16 @@ class MainActivity : AppCompatActivity() {
                     .append(", minDuration=").append(s.minDurationMinutes.toString())
                     .append(", topN=").append(s.topN.toString())
                     .append(", sourceMode=").append(s.sourceMode.name)
+                    .append(", wallpaperMode=").append(s.wallpaperMode)
+                    .append(", coverFitMode=").append(s.coverFitMode)
                     .append(", progressMode=").append(s.progressMode)
                     .append(", timeUnit=").append(s.timeUnit)
                     .append(", receiptTitle=").append(s.receiptTitle)
                     .append(", receiptTitleSize=").append(s.receiptTitleSize.toString())
                     .append(", receiptBodySize=").append(s.receiptBodySize.toString())
+                    .append(", serialNumberMode=").append(s.serialNumberMode)
+                    .append(", serialNumberCustom=").append(s.serialNumberCustom)
+                    .append(", serialNumberSize=").append(s.serialNumberSize.toString())
                     .append(", footerMode=").append(s.footerMode)
                     .append(", noteText=").append(s.noteText)
                     .append(", titleFont=").append(s.titleFont)

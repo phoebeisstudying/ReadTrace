@@ -3,22 +3,29 @@ package com.dmer.neoreaderrecords
 import android.content.ContentResolver
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.pdf.PdfRenderer
+import android.graphics.RectF
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Environment
+import android.os.ParcelFileDescriptor
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.MultiFormatWriter
 import com.google.zxing.common.BitMatrix
 import java.io.File
 import java.io.FileOutputStream
+import java.net.URL
+import java.util.zip.ZipFile
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import kotlin.random.Random
 import java.util.TimeZone
 
 object AutoWallpaperGenerator {
@@ -42,11 +49,16 @@ object AutoWallpaperGenerator {
         val weekEnd: String,
         val readingFilterMode: String,
         val sourceMode: String,
+        val wallpaperMode: String,
+        val coverFitMode: String,
         val progressMode: String,
         val timeUnit: String,
         val receiptTitle: String,
         val receiptTitleSize: Float,
         val receiptBodySize: Float,
+        val serialNumberMode: String,
+        val serialNumberCustom: String,
+        val serialNumberSize: Float,
         val footerMode: String,
         val barcodeWidthScale: Float,
         val barcodeGapMode: String,
@@ -60,12 +72,13 @@ object AutoWallpaperGenerator {
     )
 
     data class PreviewResult(val bitmap: Bitmap, val summary: String)
+    private data class FileCoverProbe(val bitmap: Bitmap?, val reason: String)
 
     fun generateAndSave(context: Context, reason: String): Boolean {
         AutoRefreshLog.i(context, "Generator start reason=$reason")
         return runCatching {
-            val built = buildPreviewInternal(context, "A") ?: return false
-            val path = saveBitmap(built.bitmap)
+            val built = buildPreviewInternal(context, "A", true) ?: return false
+            val path = saveBitmap(context, built.bitmap)
             AutoRefreshLog.i(context, "Generator saved path=$path ${built.summary}")
             true
         }.getOrElse {
@@ -75,11 +88,17 @@ object AutoWallpaperGenerator {
     }
 
     fun buildPreviewFromPrefs(context: Context, sourceMark: String = "M"): PreviewResult? {
-        return runCatching { buildPreviewInternal(context, sourceMark) }.getOrNull()
+        return runCatching { buildPreviewInternal(context, sourceMark, false) }.getOrNull()
     }
 
-    private fun buildPreviewInternal(context: Context, sourceMark: String): PreviewResult? {
+    private fun buildPreviewInternal(context: Context, sourceMark: String, fromAutoWorker: Boolean): PreviewResult? {
         val s = readSettings(context)
+        val tryCover = s.wallpaperMode == "COVER" || (s.wallpaperMode == "AUTO_COVER" && fromAutoWorker)
+        if (tryCover) {
+            tryBuildCoverWallpaper(context, s, sourceMark)?.let { return it }
+            AutoRefreshLog.i(context, "cover wallpaper unavailable, fallback stats mode")
+            if (s.wallpaperMode == "COVER") return null
+        }
         val range = resolvePeriodRange(s) ?: return null
         val books = queryTopBooks(context.contentResolver, range.first, range.second, s.topN, s.includeUnread, s.readingFilterMode)
         val stats = queryStatsByMode(context.contentResolver, range.first, range.second, s)
@@ -93,6 +112,259 @@ object AutoWallpaperGenerator {
             append(", 时长=").append(formatDuration(stats.totalMs, s.timeUnit))
         }
         return PreviewResult(bmp, summary)
+    }
+
+    private fun tryBuildCoverWallpaper(context: Context, s: AutoSettings, sourceMark: String): PreviewResult? {
+        val cursor = context.contentResolver.query(metadataUri, null, null, null, "lastAccess DESC") ?: return null
+        cursor.use { c ->
+            if (!c.moveToFirst()) {
+                AutoRefreshLog.i(context, "cover mode: metadata empty")
+                return null
+            }
+            AutoRefreshLog.i(context, "cover mode: metadata columns=${c.columnNames.joinToString(",")}")
+            val coverColumns = listOf(
+                "coverPath", "cover", "coverUri", "thumbnail", "thumbnailPath",
+                "bookCoverPath", "frontCoverPath", "coverUrl", "cover_url"
+            )
+            var row = 0
+            var candidateCount = 0
+            var fallbackTried = 0
+            do {
+                row++
+                val title = readColString(c, "title") ?: "未知书名"
+                val readingStatus = readColString(c, "readingStatus") ?: "?"
+                val nativePath = readColString(c, "nativeAbsolutePath") ?: ""
+                AutoRefreshLog.i(
+                    context,
+                    "cover mode row=$row title=${title.take(48)} status=$readingStatus ext=${File(nativePath).extension.lowercase(Locale.ROOT)}"
+                )
+                for (col in coverColumns) {
+                    readColString(c, col)?.let { v ->
+                        candidateCount++
+                        AutoRefreshLog.i(context, "cover mode row=$row candidate $col=${v.take(120)}")
+                    }
+                    val bmp = readBitmapFromColumn(context, c, col)
+                    if (bmp != null) {
+                        AutoRefreshLog.i(context, "cover mode hit row=$row column=$col title=$title w=${bmp.width} h=${bmp.height}")
+                        return PreviewResult(renderCoverWallpaper(context, bmp, title, sourceMark, s.coverFitMode), "封面壁纸 title=$title col=$col fit=${s.coverFitMode}")
+                    }
+                }
+                
+                val md5 = readColString(c, "md5")
+                if (!md5.isNullOrBlank()) {
+                    val root = Environment.getExternalStorageDirectory().absolutePath
+                    val cachePaths = listOf(
+                        "$root/.kreader/cover/$md5.jpg",
+                        "$root/.kreader/cover/$md5.png",
+                        "$root/.Onyx/cloud/cache/reader/$md5.jpg"
+                    )
+                    for (cp in cachePaths) {
+                        val cbmp = BitmapFactory.decodeFile(cp)
+                        if (cbmp != null) {
+                            AutoRefreshLog.i(context, "cover mode hit row=$row md5 cache=$cp w=${cbmp.width} h=${cbmp.height}")
+                            return PreviewResult(renderCoverWallpaper(context, cbmp, title, sourceMark, s.coverFitMode), "封面壁纸 title=$title md5 cache fit=${s.coverFitMode}")
+                        }
+                    }
+                }
+
+                val structuredSpecs = extractStructuredCoverSpecs(
+                    readColString(c, "coverUrl"),
+                    readColString(c, "extraInfo"),
+                    readColString(c, "downloadInfo")
+                )
+                if (structuredSpecs.isNotEmpty()) {
+                    AutoRefreshLog.i(context, "cover mode row=$row structured specs=${structuredSpecs.joinToString(" | ").take(300)}")
+                }
+                for (spec in structuredSpecs) {
+                    val bmp = decodeBitmapByPathOrUri(context, spec)
+                    if (bmp != null) {
+                        AutoRefreshLog.i(context, "cover mode hit row=$row structured spec=$spec w=${bmp.width} h=${bmp.height}")
+                        return PreviewResult(renderCoverWallpaper(context, bmp, title, sourceMark, s.coverFitMode), "封面壁纸 title=$title structured fit=${s.coverFitMode}")
+                    }
+                }
+                if (nativePath.isNotBlank()) {
+                    fallbackTried++
+                    val f = java.io.File(nativePath)
+                    val cacheKey = "${nativePath.hashCode()}_${f.lastModified()}.jpg"
+                    val myCacheDir = java.io.File(context.cacheDir, "extracted_covers").apply { if (!exists()) mkdirs() }
+                    val cacheFile = java.io.File(myCacheDir, cacheKey)
+                    
+                    if (cacheFile.exists() && cacheFile.length() > 0) {
+                        val cbmp = android.graphics.BitmapFactory.decodeFile(cacheFile.absolutePath)
+                        if (cbmp != null) {
+                            AutoRefreshLog.i(context, "cover mode hit by internal cache row=$row title=$title w=${cbmp.width} h=${cbmp.height}")
+                            return PreviewResult(renderCoverWallpaper(context, cbmp, title, sourceMark, s.coverFitMode), "封面壁纸 title=$title source=internal_cache fit=${s.coverFitMode}")
+                        }
+                    }
+
+                    val probe = decodeCoverFromBookFileWithReason(nativePath)
+                    val fallback = probe.bitmap
+                    if (fallback != null) {
+                        runCatching {
+                            java.io.FileOutputStream(cacheFile).use { out ->
+                                fallback.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, out)
+                            }
+                        }
+                        AutoRefreshLog.i(context, "cover mode hit by file fallback row=$row title=$title path=$nativePath w=${fallback.width} h=${fallback.height}")
+                        return PreviewResult(renderCoverWallpaper(context, fallback, title, sourceMark, s.coverFitMode), "封面壁纸 title=$title source=file fit=${s.coverFitMode}")
+                    } else {
+                        AutoRefreshLog.i(context, "cover mode row=$row file fallback miss reason=${probe.reason} path=$nativePath")
+                    }
+                }
+                val hints = listOf("nativeAbsolutePath", "filePath", "path").mapNotNull { k -> readColString(c, k)?.let { "$k=$it" } }
+                AutoRefreshLog.i(context, "cover mode row=$row no cover decoded title=$title pathHints=${hints.joinToString(";")}")
+            } while (row < 30 && c.moveToNext())
+            AutoRefreshLog.i(context, "cover mode exhausted rows=$row candidates=$candidateCount fallbackTried=$fallbackTried no valid cover")
+            return null
+        }
+    }
+
+    private fun readColString(c: android.database.Cursor, name: String): String? {
+        val idx = c.getColumnIndex(name)
+        if (idx < 0 || c.isNull(idx)) return null
+        return runCatching { c.getString(idx) }.getOrNull()
+    }
+
+    private fun readBitmapFromColumn(context: Context, c: android.database.Cursor, name: String): Bitmap? {
+        val idx = c.getColumnIndex(name)
+        if (idx < 0 || c.isNull(idx)) return null
+        return when (c.getType(idx)) {
+            android.database.Cursor.FIELD_TYPE_BLOB -> {
+                val blob = c.getBlob(idx) ?: return null
+                BitmapFactory.decodeByteArray(blob, 0, blob.size)
+            }
+            android.database.Cursor.FIELD_TYPE_STRING -> {
+                val v = c.getString(idx) ?: return null
+                decodeBitmapByPathOrUri(context, v)
+            }
+            else -> null
+        }
+    }
+
+    private fun decodeBitmapByPathOrUri(context: Context, value: String): Bitmap? {
+        return runCatching {
+            when {
+                value.startsWith("content://") -> context.contentResolver.openInputStream(Uri.parse(value))?.use { BitmapFactory.decodeStream(it) }
+                value.startsWith("/") -> BitmapFactory.decodeFile(value)
+                value.startsWith("http://") || value.startsWith("https://") -> URL(value).openStream().use { BitmapFactory.decodeStream(it) }
+                else -> null
+            }
+        }.getOrNull()
+    }
+
+    private fun extractStructuredCoverSpecs(vararg texts: String?): List<String> {
+        val out = linkedSetOf<String>()
+        val imagePathRegex = Regex("""(/[^"'\\s]+?\.(?:jpg|jpeg|png|webp|bmp))""", RegexOption.IGNORE_CASE)
+        val contentRegex = Regex("""(content://[^"'\\s]+)""", RegexOption.IGNORE_CASE)
+        val httpRegex = Regex("""(https?://[^"'\\s]+)""", RegexOption.IGNORE_CASE)
+        val keyRegex = Regex(""""(?:cover|coverUrl|cover_uri|thumbnail|thumb|image|img)"\s*:\s*"([^"]+)"""", RegexOption.IGNORE_CASE)
+        for (text in texts) {
+            if (text.isNullOrBlank()) continue
+            contentRegex.findAll(text).forEach { out += it.groupValues[1] }
+            imagePathRegex.findAll(text).forEach { out += it.groupValues[1] }
+            httpRegex.findAll(text).forEach { out += it.groupValues[1] }
+            keyRegex.findAll(text).forEach { m ->
+                val v = m.groupValues[1].trim()
+                if (v.startsWith("content://") || v.startsWith("/") || v.startsWith("http://") || v.startsWith("https://")) {
+                    out += v
+                }
+            }
+        }
+        return out.toList()
+    }
+
+    private fun decodeCoverFromBookFile(path: String): Bitmap? {
+        return decodeCoverFromBookFileWithReason(path).bitmap
+    }
+
+    private fun decodeCoverFromBookFileWithReason(path: String): FileCoverProbe {
+        val file = File(path)
+        if (!file.exists()) return FileCoverProbe(null, "file_not_exists")
+        if (!file.canRead()) return FileCoverProbe(null, "file_not_readable")
+        val ext = file.extension.lowercase(Locale.ROOT)
+        if (ext in setOf("mobi", "azw3", "azw", "jeb", "txt")) {
+            return FileCoverProbe(null, "format_not_implemented:$ext")
+        }
+        return runCatching {
+            when (ext) {
+                "epub" -> FileCoverProbe(decodeEpubCover(file), "epub_decode")
+                "cbz", "zip" -> FileCoverProbe(decodeCbzCover(file), "cbz_decode")
+                "pdf" -> FileCoverProbe(decodePdfFirstPage(file), "pdf_decode")
+                else -> FileCoverProbe(null, "unsupported_ext:$ext")
+            }
+        }.getOrElse { FileCoverProbe(null, "exception:${it.javaClass.simpleName}:${it.message}") }
+    }
+
+    private fun decodeEpubCover(file: File): Bitmap? {
+        ZipFile(file).use { zip ->
+            val entries = zip.entries().asSequence().toList()
+            val imageEntries = entries.filter { isImageEntryName(it.name) }
+            if (imageEntries.isEmpty()) return null
+            val preferred = imageEntries
+                .filter { it.name.lowercase(Locale.ROOT).contains("cover") }
+                .sortedBy { it.name.length }
+                .firstOrNull()
+                ?: imageEntries.sortedBy { it.name.length }.firstOrNull()
+            return preferred?.let { entry ->
+                zip.getInputStream(entry).use { BitmapFactory.decodeStream(it) }
+            }
+        }
+    }
+
+    private fun decodeCbzCover(file: File): Bitmap? {
+        ZipFile(file).use { zip ->
+            val entries = zip.entries().asSequence()
+                .filter { !it.isDirectory && isImageEntryName(it.name) }
+                .sortedBy { it.name.lowercase(Locale.ROOT) }
+                .toList()
+            val first = entries.firstOrNull() ?: return null
+            return zip.getInputStream(first).use { BitmapFactory.decodeStream(it) }
+        }
+    }
+
+    private fun decodePdfFirstPage(file: File): Bitmap? {
+        val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+        pfd.use { descriptor ->
+            PdfRenderer(descriptor).use { renderer ->
+                if (renderer.pageCount <= 0) return null
+                renderer.openPage(0).use { page ->
+                    val w = (page.width * 2).coerceAtLeast(1200)
+                    val h = (page.height * 2).coerceAtLeast(1600)
+                    val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                    val canvas = Canvas(bitmap)
+                    canvas.drawColor(Color.WHITE)
+                    page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                    return bitmap
+                }
+            }
+        }
+    }
+
+    private fun isImageEntryName(name: String): Boolean {
+        val l = name.lowercase(Locale.ROOT)
+        return l.endsWith(".jpg") || l.endsWith(".jpeg") || l.endsWith(".png") || l.endsWith(".webp")
+    }
+
+    private fun renderCoverWallpaper(context: Context, cover: Bitmap, title: String, sourceMark: String, fitMode: String): Bitmap {
+        val w = context.resources.displayMetrics.widthPixels.coerceAtLeast(1200)
+        val h = context.resources.displayMetrics.heightPixels.coerceAtLeast(1600)
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(out)
+        canvas.drawColor(Color.WHITE)
+        val scale = if (fitMode == "CROP") maxOf(w / cover.width.toFloat(), h / cover.height.toFloat())
+        else minOf(w / cover.width.toFloat(), h / cover.height.toFloat())
+        val dw = cover.width * scale
+        val dh = cover.height * scale
+        val dst = RectF((w - dw) / 2f, (h - dh) / 2f, (w + dw) / 2f, (h + dh) / 2f)
+        canvas.drawBitmap(cover, null, dst, null)
+        val label = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.BLACK
+            textSize = 34f
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+        }
+        canvas.drawText(shortTitle(title, 26), 44f, h - 56f, label)
+        drawSourceCornerMark(canvas, w, h, sourceMark, 1f)
+        return out
     }
 
     private fun readSettings(context: Context): AutoSettings {
@@ -109,11 +381,16 @@ object AutoWallpaperGenerator {
             weekEnd = p.getString("week_end", currentWeekEndYmd()) ?: currentWeekEndYmd(),
             readingFilterMode = p.getString("reading_filter_mode", "ALL") ?: "ALL",
             sourceMode = p.getString("source_mode", "DURATION") ?: "DURATION",
+            wallpaperMode = p.getString("wallpaper_mode", "STATS") ?: "STATS",
+            coverFitMode = p.getString("cover_fit_mode", "FIT") ?: "FIT",
             progressMode = p.getString("progress_mode", "PAGES") ?: "PAGES",
             timeUnit = p.getString("time_unit", "HOUR") ?: "HOUR",
             receiptTitle = p.getString("receipt_title", "阅读账单") ?: "阅读账单",
             receiptTitleSize = p.getFloat("receipt_title_size", 74f).coerceIn(24f, 120f),
             receiptBodySize = p.getFloat("receipt_body_size", 34f).coerceIn(18f, 60f),
+            serialNumberMode = p.getString("serial_number_mode", "DATE") ?: "DATE",
+            serialNumberCustom = (p.getString("serial_number_custom", "") ?: "").filter { it.isDigit() }.take(12),
+            serialNumberSize = p.getFloat("serial_number_size", 46f).coerceIn(24f, 140f),
             footerMode = p.getString("footer_mode", "NONE") ?: "NONE",
             barcodeWidthScale = p.getFloat("barcode_width_scale", 1.0f).coerceIn(0.6f, 1.6f),
             barcodeGapMode = p.getString("barcode_gap_mode", "STANDARD") ?: "STANDARD",
@@ -158,6 +435,7 @@ object AutoWallpaperGenerator {
         val bodyFace = resolveTypeface(context, s0.bodyFont, false)
         val titlePaint = Paint(black).apply { textSize = s(s0.receiptTitleSize); typeface = titleFace }
         val h1 = Paint(black).apply { textSize = s((s0.receiptBodySize * 1.35f).coerceIn(24f, 90f)); typeface = Typeface.create(bodyFace, Typeface.BOLD) }
+        val serialNumberPaint = Paint(black).apply { textSize = s(s0.serialNumberSize); typeface = Typeface.create(bodyFace, Typeface.BOLD) }
         val text = Paint(black).apply { textSize = s(s0.receiptBodySize); typeface = bodyFace }
         val mono = Paint(black).apply { textSize = s((s0.receiptBodySize * 0.88f).coerceIn(16f, 56f)); typeface = bodyFace }
         val line = Paint(black).apply { strokeWidth = s(3f) }
@@ -165,7 +443,12 @@ object AutoWallpaperGenerator {
         var y = s(110f)
         c.drawText(shortTitle(s0.receiptTitle, 12), w - s(360f), y, titlePaint)
         y += s(30f)
-        c.drawText("单号: ${SimpleDateFormat("MMdd", Locale.US).format(Date())}", s(60f), y + s(40f), h1)
+        val serialBaseY = y + s(40f)
+        val serialPrefix = "单号: "
+        val serialValue = resolveSerialNumber(s0)
+        c.drawText(serialPrefix, s(60f), serialBaseY, h1)
+        val prefixWidth = h1.measureText(serialPrefix)
+        c.drawText(serialValue, s(60f) + prefixWidth, serialBaseY, serialNumberPaint)
         c.drawText("操作编号: ${System.currentTimeMillis().toString().takeLast(6)}", s(60f), y + s(95f), text)
         c.drawText("时间: ${fmt(rangeStart)} - ${fmt(rangeEnd)}", s(60f), y + s(145f), text)
         c.drawText("设备: Onyx Leaf5", s(60f), y + s(195f), text)
@@ -279,6 +562,14 @@ object AutoWallpaperGenerator {
 
         drawSourceCornerMark(c, w, h, sourceMark, gs)
         return bmp
+    }
+
+    private fun resolveSerialNumber(s: AutoSettings): String {
+        return when (s.serialNumberMode) {
+            "RANDOM" -> String.format(Locale.US, "%06d", Random.nextInt(0, 1_000_000))
+            "CUSTOM" -> s.serialNumberCustom.ifBlank { SimpleDateFormat("MMdd", Locale.US).format(Date()) }
+            else -> SimpleDateFormat("MMdd", Locale.US).format(Date())
+        }
     }
 
     private fun queryStatsByMode(resolver: ContentResolver, start: Long, end: Long, s: AutoSettings): ChartStats {
@@ -688,11 +979,20 @@ object AutoWallpaperGenerator {
         return String.format(Locale.US, "%.1f%%", (cur / total) * 100.0)
     }
 
-    private fun saveBitmap(bitmap: Bitmap): String {
+    private fun saveBitmap(context: android.content.Context, bitmap: Bitmap): String {
         val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "NeoReader")
         if (!dir.exists()) dir.mkdirs()
         val file = File(dir, "neoreader_wallpaper.png")
         FileOutputStream(file).use { out -> bitmap.compress(Bitmap.CompressFormat.PNG, 100, out) }
+        runCatching {
+            android.media.MediaScannerConnection.scanFile(
+                context,
+                arrayOf(file.absolutePath),
+                arrayOf("image/png")
+            ) { path, uri ->
+                AutoRefreshLog.i(context, "MediaScanner scanned updated image: uri=$uri")
+            }
+        }
         return file.absolutePath
     }
 }

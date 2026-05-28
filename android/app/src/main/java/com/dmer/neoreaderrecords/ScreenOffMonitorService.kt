@@ -8,25 +8,31 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.database.ContentObserver
+import android.net.Uri
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import androidx.core.app.NotificationCompat
 
 class ScreenOffMonitorService : Service() {
     private var receiver: BroadcastReceiver? = null
+    private var contentObserver: ContentObserver? = null
 
     override fun onCreate() {
         super.onCreate()
         AutoRefreshLog.i(this, "ScreenOffMonitorService.onCreate")
         ensureChannel()
         startForeground(17731, buildNotification())
+        
+        // 1. Register display state receiver
         val r = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 AutoRefreshLog.i(this@ScreenOffMonitorService, "ScreenOffMonitorService receiver action=${intent?.action}")
                 if (intent?.action == Intent.ACTION_SCREEN_OFF) {
                     AutoRefreshWorker.enqueue(this@ScreenOffMonitorService, "screen_off")
                 } else if (intent?.action == Intent.ACTION_SCREEN_ON || intent?.action == Intent.ACTION_USER_PRESENT) {
-                    // Pre-generate while screen is on/unlocked, so next lock can use latest wallpaper.
                     AutoRefreshWorker.enqueue(this@ScreenOffMonitorService, "screen_on_prewarm")
                 }
             }
@@ -38,6 +44,21 @@ class ScreenOffMonitorService : Service() {
         }
         registerReceiver(r, filter)
         receiver = r
+
+        // 2. Register NeoReader database observer
+        val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
+            override fun onChange(selfChange: Boolean, uri: Uri?) {
+                super.onChange(selfChange, uri)
+                AutoRefreshLog.i(this@ScreenOffMonitorService, "ScreenOffMonitorService content_changed uri=$uri")
+                AutoRefreshWorker.enqueue(this@ScreenOffMonitorService, "book_content_changed")
+            }
+        }
+        contentObserver = observer
+        contentResolver.registerContentObserver(
+            Uri.parse("content://com.onyx.content.database.ContentProvider/Metadata"),
+            true, // notifyForDescendants
+            observer
+        )
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -51,6 +72,10 @@ class ScreenOffMonitorService : Service() {
             runCatching { unregisterReceiver(it) }
         }
         receiver = null
+        contentObserver?.let {
+            contentResolver.unregisterContentObserver(it)
+        }
+        contentObserver = null
         super.onDestroy()
     }
 
