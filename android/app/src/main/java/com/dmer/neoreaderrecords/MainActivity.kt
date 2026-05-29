@@ -92,6 +92,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var autoModeGroup: RadioGroup
     private lateinit var autoDailyTimeInput: EditText
     private lateinit var autoMinIntervalInput: EditText
+    private lateinit var autoContentObserverCheck: CheckBox
+    private lateinit var autoScreenOnPrewarmCheck: CheckBox
     private lateinit var autoModeHintText: TextView
     private lateinit var pickFontDirBtn: Button
     private lateinit var titleFontSpinner: Spinner
@@ -661,8 +663,16 @@ class MainActivity : AppCompatActivity() {
         autoModeHintText = TextView(this).apply {
             textSize = 12f
         }
+        autoContentObserverCheck = CheckBox(this).apply {
+            text = "开启内容变化监听（更实时，明显更耗电）"
+            isChecked = prefs.getBoolean(AutoRefreshConfig.KEY_ENABLE_CONTENT_OBSERVER, false)
+        }
+        autoScreenOnPrewarmCheck = CheckBox(this).apply {
+            text = "开启亮屏预热（锁屏前先生成，较耗电）"
+            isChecked = prefs.getBoolean(AutoRefreshConfig.KEY_ENABLE_SCREEN_ON_PREWARM, false)
+        }
         val autoWarningText = TextView(this).apply {
-            text = "提示：熄屏触发会增加唤醒次数与耗电，墨水屏建议优先每日定时。"
+            text = "说明：\n1) 内容变化监听：监听 NeoReader 元数据变化并触发刷新，使用独立短节流（约45秒），不受熄屏最小间隔影响。\n2) 亮屏预热：在点亮/解锁时预先生成，下次锁屏更可能立刻看到新壁纸。\n3) 如追求续航，建议关闭以上两项，仅保留每日定时。"
             textSize = 12f
         }
 
@@ -808,11 +818,14 @@ class MainActivity : AppCompatActivity() {
             autoModeGroup.check(8001)
             autoDailyTimeInput.setText("22:30")
             autoMinIntervalInput.setText("3")
+            autoContentObserverCheck.isChecked = false
+            autoScreenOnPrewarmCheck.isChecked = false
             applySettingsPreview()
         })
         val autoMinIntervalControl = numberControl("熄屏最小间隔(分钟)", autoMinIntervalInput, 1, 240)
         secAuto.addView(autoSectionLabel); secAuto.addView(autoRefreshCheck); secAuto.addView(autoModeGroup); secAuto.addView(autoDailyTimeInput)
-        secAuto.addView(autoMinIntervalControl); secAuto.addView(autoModeHintText); secAuto.addView(autoWarningText); container.addView(secAutoBox)
+        secAuto.addView(autoMinIntervalControl); secAuto.addView(autoContentObserverCheck); secAuto.addView(autoScreenOnPrewarmCheck)
+        secAuto.addView(autoModeHintText); secAuto.addView(autoWarningText); container.addView(secAutoBox)
 
         fun updateConditionalVisibility() {
             val showChart = showChartCheck.isChecked
@@ -842,6 +855,8 @@ class MainActivity : AppCompatActivity() {
             autoModeGroup.visibility = if (autoEnabled) View.VISIBLE else View.GONE
             autoDailyTimeInput.visibility = if (autoEnabled && autoModeGroup.checkedRadioButtonId == 8001) View.VISIBLE else View.GONE
             autoMinIntervalControl.visibility = if (autoEnabled && autoModeGroup.checkedRadioButtonId == 8002) View.VISIBLE else View.GONE
+            autoContentObserverCheck.visibility = if (autoEnabled && autoModeGroup.checkedRadioButtonId == 8002) View.VISIBLE else View.GONE
+            autoScreenOnPrewarmCheck.visibility = if (autoEnabled && autoModeGroup.checkedRadioButtonId == 8002) View.VISIBLE else View.GONE
             autoModeHintText.visibility = if (autoEnabled) View.VISIBLE else View.GONE
             autoWarningText.visibility = if (autoEnabled) View.VISIBLE else View.GONE
 
@@ -855,6 +870,8 @@ class MainActivity : AppCompatActivity() {
         footerModeGroup.setOnCheckedChangeListener { _, _ -> updateConditionalVisibility(); if (!isInitializingUi) applySettingsPreview() }
         autoRefreshCheck.setOnCheckedChangeListener { _, _ -> updateConditionalVisibility(); if (!isInitializingUi) applySettingsPreview() }
         autoModeGroup.setOnCheckedChangeListener { _, _ -> updateConditionalVisibility(); if (!isInitializingUi) applySettingsPreview() }
+        autoContentObserverCheck.setOnCheckedChangeListener { _, _ -> if (!isInitializingUi) applySettingsPreview() }
+        autoScreenOnPrewarmCheck.setOnCheckedChangeListener { _, _ -> if (!isInitializingUi) applySettingsPreview() }
         serialModeGroup.setOnCheckedChangeListener { _, _ -> updateConditionalVisibility(); if (!isInitializingUi) applySettingsPreview() }
         wallpaperModeGroup.setOnCheckedChangeListener { _, _ -> updateConditionalVisibility(); if (!isInitializingUi) applySettingsPreview() }
         updateConditionalVisibility()
@@ -1079,6 +1096,8 @@ class MainActivity : AppCompatActivity() {
             .putString(AutoRefreshConfig.KEY_AUTO_MODE, mode)
             .putString(AutoRefreshConfig.KEY_DAILY_TIME, dailyTime)
             .putInt(AutoRefreshConfig.KEY_SCREEN_OFF_MIN_INTERVAL, minInterval)
+            .putBoolean(AutoRefreshConfig.KEY_ENABLE_CONTENT_OBSERVER, autoContentObserverCheck.isChecked)
+            .putBoolean(AutoRefreshConfig.KEY_ENABLE_SCREEN_ON_PREWARM, autoScreenOnPrewarmCheck.isChecked)
             .apply()
         if (autoDailyTimeInput.text.toString() != dailyTime) {
             autoDailyTimeInput.setText(dailyTime)
@@ -1087,13 +1106,13 @@ class MainActivity : AppCompatActivity() {
         updateAutoRefreshHint()
         AutoRefreshScheduler.reschedule(this)
         AutoRefreshRuntime.sync(this)
-        AutoRefreshLog.i(this, "auto settings updated: enabled=$isEnabled mode=$mode dailyTime=$dailyTime minInterval=$minInterval")
+        AutoRefreshLog.i(this, "auto settings updated: enabled=$isEnabled mode=$mode dailyTime=$dailyTime minInterval=$minInterval observer=${autoContentObserverCheck.isChecked} prewarm=${autoScreenOnPrewarmCheck.isChecked}")
     }
 
     private fun updateAutoRefreshHint() {
         val mode = if (::autoModeGroup.isInitialized && autoModeGroup.checkedRadioButtonId == 8002) "熄屏触发" else "每日定时"
         autoModeHintText.text = if (::autoRefreshCheck.isInitialized && autoRefreshCheck.isChecked) {
-            "当前自动模式：$mode，熄屏最小间隔=${autoMinIntervalInput.text}"
+            "当前自动模式：$mode，熄屏最小间隔=${autoMinIntervalInput.text}，监听=${if (autoContentObserverCheck.isChecked) "开" else "关"}，预热=${if (autoScreenOnPrewarmCheck.isChecked) "开" else "关"}"
         } else {
             "当前自动模式：已关闭"
         }

@@ -33,7 +33,11 @@ class ScreenOffMonitorService : Service() {
                 if (intent?.action == Intent.ACTION_SCREEN_OFF) {
                     AutoRefreshWorker.enqueue(this@ScreenOffMonitorService, "screen_off")
                 } else if (intent?.action == Intent.ACTION_SCREEN_ON || intent?.action == Intent.ACTION_USER_PRESENT) {
-                    AutoRefreshWorker.enqueue(this@ScreenOffMonitorService, "screen_on_prewarm")
+                    if (AutoRefreshConfig.enableScreenOnPrewarm(this@ScreenOffMonitorService)) {
+                        AutoRefreshWorker.enqueue(this@ScreenOffMonitorService, "screen_on_prewarm")
+                    } else {
+                        AutoRefreshLog.i(this@ScreenOffMonitorService, "skip screen_on_prewarm: disabled")
+                    }
                 }
             }
         }
@@ -45,20 +49,24 @@ class ScreenOffMonitorService : Service() {
         registerReceiver(r, filter)
         receiver = r
 
-        // 2. Register NeoReader database observer
-        val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
-            override fun onChange(selfChange: Boolean, uri: Uri?) {
-                super.onChange(selfChange, uri)
-                AutoRefreshLog.i(this@ScreenOffMonitorService, "ScreenOffMonitorService content_changed uri=$uri")
-                AutoRefreshWorker.enqueue(this@ScreenOffMonitorService, "book_content_changed")
+        // 2. Register NeoReader database observer (disabled by default for battery saving)
+        if (AutoRefreshConfig.enableContentObserver(this)) {
+            val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
+                override fun onChange(selfChange: Boolean, uri: Uri?) {
+                    super.onChange(selfChange, uri)
+                    AutoRefreshLog.i(this@ScreenOffMonitorService, "ScreenOffMonitorService content_changed uri=$uri")
+                    AutoRefreshWorker.enqueue(this@ScreenOffMonitorService, "book_content_changed")
+                }
             }
+            contentObserver = observer
+            contentResolver.registerContentObserver(
+                Uri.parse("content://com.onyx.content.database.ContentProvider/Metadata"),
+                true,
+                observer
+            )
+        } else {
+            AutoRefreshLog.i(this, "content observer disabled by config")
         }
-        contentObserver = observer
-        contentResolver.registerContentObserver(
-            Uri.parse("content://com.onyx.content.database.ContentProvider/Metadata"),
-            true, // notifyForDescendants
-            observer
-        )
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
