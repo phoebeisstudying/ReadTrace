@@ -1086,15 +1086,6 @@ class MainActivity : AppCompatActivity() {
         val dailyTime = normalizeDailyTime(autoDailyTimeInput.text.toString())
         val minInterval = autoMinIntervalInput.text.toString().trim().toIntOrNull()?.coerceIn(1, 240) ?: 3
         val prefs = getSharedPreferences(AutoRefreshConfig.PREFS_NAME, Context.MODE_PRIVATE)
-        val oldEnabled = prefs.getBoolean(AutoRefreshConfig.KEY_AUTO_ENABLED, true)
-        val oldMode = prefs.getString(AutoRefreshConfig.KEY_AUTO_MODE, AutoRefreshConfig.MODE_DAILY) ?: AutoRefreshConfig.MODE_DAILY
-        val oldDailyTime = prefs.getString(AutoRefreshConfig.KEY_DAILY_TIME, "22:30") ?: "22:30"
-        val oldMinInterval = prefs.getInt(AutoRefreshConfig.KEY_SCREEN_OFF_MIN_INTERVAL, 3).coerceIn(1, 240)
-        val changed =
-            oldEnabled != isEnabled ||
-            oldMode != mode ||
-            oldDailyTime != dailyTime ||
-            oldMinInterval != minInterval
         prefs.edit()
             .putBoolean(AutoRefreshConfig.KEY_AUTO_ENABLED, isEnabled)
             .putString(AutoRefreshConfig.KEY_AUTO_MODE, mode)
@@ -1107,13 +1098,9 @@ class MainActivity : AppCompatActivity() {
         }
         updateAutoRefreshHint()
         updateAutoRuntimeState()
-        if (changed) {
-            AutoRefreshScheduler.reschedule(this)
-            AutoRefreshRuntime.sync(this)
-            AutoRefreshLog.i(this, "auto settings updated: enabled=$isEnabled mode=$mode dailyTime=$dailyTime minInterval=$minInterval")
-        } else {
-            AutoRefreshLog.i(this, "auto settings unchanged: skip runtime sync")
-        }
+        AutoRefreshScheduler.reschedule(this)
+        AutoRefreshRuntime.sync(this)
+        AutoRefreshLog.i(this, "auto settings updated: enabled=$isEnabled mode=$mode dailyTime=$dailyTime minInterval=$minInterval")
     }
 
     private fun updateAutoRefreshHint() {
