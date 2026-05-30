@@ -19,7 +19,6 @@ import com.google.zxing.MultiFormatWriter
 import com.google.zxing.common.BitMatrix
 import java.io.File
 import java.io.FileOutputStream
-import java.net.URL
 import java.util.zip.ZipFile
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -134,7 +133,7 @@ object AutoWallpaperGenerator {
                 logCoverProbeSummary(context, startedAt, "miss:metadata_empty", null, trace)
                 return null
             }
-            AutoRefreshLog.i(context, "cover mode: metadata columns=${c.columnNames.joinToString(",")}")
+            AutoRefreshLog.i(context, "cover mode: metadata columns=${c.columnNames.joinToString(",")} (local-only)")
             val coverColumns = listOf(
                 "coverPath", "cover", "coverUri", "thumbnail", "thumbnailPath",
                 "bookCoverPath", "frontCoverPath", "coverUrl", "cover_url"
@@ -153,6 +152,9 @@ object AutoWallpaperGenerator {
                 for (col in coverColumns) {
                     readColString(c, col)?.let { v ->
                         trace.columnCandidateCount++
+                        if (v.startsWith("http://") || v.startsWith("https://")) {
+                            AutoRefreshLog.i(context, "cover mode row=$row candidate $col ignored network url (local-only)")
+                        }
                         AutoRefreshLog.i(context, "cover mode row=$row candidate $col=${v.take(120)}")
                     }
                     trace.columnDecodeAttempts++
@@ -257,7 +259,7 @@ object AutoWallpaperGenerator {
         }
         AutoRefreshLog.i(
             context,
-            "cover probe summary outcome=$outcome costMs=$cost rows=${trace.rowsScanned} title=${title?.take(48) ?: "-"} " +
+            "cover probe summary outcome=$outcome localOnly=true costMs=$cost rows=${trace.rowsScanned} title=${title?.take(48) ?: "-"} " +
                 "colCand=${trace.columnCandidateCount} colTry=${trace.columnDecodeAttempts} md5Try=${trace.md5CacheAttempts} " +
                 "specTry=${trace.structuredSpecAttempts} internalTry=${trace.internalCacheAttempts} fileTry=${trace.fileFallbackAttempts} missReasons=$missReasons"
         )
@@ -286,11 +288,14 @@ object AutoWallpaperGenerator {
     }
 
     private fun decodeBitmapByPathOrUri(context: Context, value: String): Bitmap? {
+        if (value.startsWith("http://") || value.startsWith("https://")) {
+            AutoRefreshLog.i(context, "cover mode ignored network url decode request (local-only)")
+            return null
+        }
         return runCatching {
             when {
                 value.startsWith("content://") -> context.contentResolver.openInputStream(Uri.parse(value))?.use { BitmapFactory.decodeStream(it) }
                 value.startsWith("/") -> BitmapFactory.decodeFile(value)
-                value.startsWith("http://") || value.startsWith("https://") -> URL(value).openStream().use { BitmapFactory.decodeStream(it) }
                 else -> null
             }
         }.getOrNull()
@@ -300,16 +305,14 @@ object AutoWallpaperGenerator {
         val out = linkedSetOf<String>()
         val imagePathRegex = Regex("""(/[^"'\\s]+?\.(?:jpg|jpeg|png|webp|bmp))""", RegexOption.IGNORE_CASE)
         val contentRegex = Regex("""(content://[^"'\\s]+)""", RegexOption.IGNORE_CASE)
-        val httpRegex = Regex("""(https?://[^"'\\s]+)""", RegexOption.IGNORE_CASE)
         val keyRegex = Regex(""""(?:cover|coverUrl|cover_uri|thumbnail|thumb|image|img)"\s*:\s*"([^"]+)"""", RegexOption.IGNORE_CASE)
         for (text in texts) {
             if (text.isNullOrBlank()) continue
             contentRegex.findAll(text).forEach { out += it.groupValues[1] }
             imagePathRegex.findAll(text).forEach { out += it.groupValues[1] }
-            httpRegex.findAll(text).forEach { out += it.groupValues[1] }
             keyRegex.findAll(text).forEach { m ->
                 val v = m.groupValues[1].trim()
-                if (v.startsWith("content://") || v.startsWith("/") || v.startsWith("http://") || v.startsWith("https://")) {
+                if (v.startsWith("content://") || v.startsWith("/")) {
                     out += v
                 }
             }
