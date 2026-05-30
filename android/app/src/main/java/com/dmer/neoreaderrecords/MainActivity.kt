@@ -37,7 +37,7 @@ import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.appcompat.app.AppCompatActivity
+import androidx.activity.ComponentActivity
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.MultiFormatWriter
@@ -51,7 +51,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 
-class MainActivity : AppCompatActivity() {
+class MainActivity : ComponentActivity() {
     companion object {
         private const val FONT_ENTRY_SEP = "@@"
     }
@@ -549,8 +549,9 @@ class MainActivity : AppCompatActivity() {
                 options.forEachIndexed { index, (id, text) ->
                     val tv = TextView(this).apply {
                         this.text = text
-                        textSize = 18f
+                        textSize = if (text.contains("\n")) 16f else 18f
                         setTypeface(Typeface.DEFAULT_BOLD)
+                        setLineSpacing(4f, 1.0f)
                         setPadding(32, 24, 32, 24)
                         setOnClickListener {
                             group.check(id)
@@ -583,10 +584,11 @@ class MainActivity : AppCompatActivity() {
                     rowOptions.forEachIndexed { colIndex, (id, text) ->
                         val tv = TextView(this).apply {
                             this.text = text
-                            textSize = 16f
+                            textSize = if (text.contains("\n")) 13f else 16f
                             setTypeface(Typeface.DEFAULT_BOLD)
                             gravity = Gravity.CENTER
-                            setPadding(16, 24, 16, 24)
+                            setLineSpacing(4f, 1.0f)
+                            setPadding(12, 20, 12, 20)
                             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                             setOnClickListener {
                                 group.check(id)
@@ -790,44 +792,44 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, 0, 0, 40)
         })
 
-        val periodOptions = listOf(4000 to "当天", 4006 to "昨天", 4001 to "本周", 4002 to "上周", 4003 to "最近7天", 4004 to "最近30天", 4005 to "自定义起止")
+        val periodOptions = listOf(4000 to "当天\n只看今天", 4006 to "昨天\n只看昨日", 4001 to "本周\n周视图", 4002 to "上周\n回看上周", 4003 to "最近7天\n滚动7天", 4004 to "最近30天\n月度概览", 4005 to "自定义起止\n手动选日期")
         val periodNames = listOf(PeriodMode.TODAY.name, PeriodMode.YESTERDAY.name, PeriodMode.THIS_WEEK.name, PeriodMode.LAST_WEEK.name, PeriodMode.LAST_7_DAYS.name, PeriodMode.LAST_30_DAYS.name, PeriodMode.CUSTOM.name)
         val savedPeriod = prefs.getString("period_mode", PeriodMode.THIS_WEEK.name) ?: PeriodMode.THIS_WEEK.name
         periodGroup = makeRadioGroup(periodOptions, selectedId(savedPeriod, 4001, periodOptions, periodNames))
 
-        val sourceOptions = listOf(1001 to "按阅读时长事件（推荐）", 1002 to "按有路径会话", 1003 to "按Metadata最近访问")
+        val sourceOptions = listOf(1001 to "按阅读时长事件（推荐）\n优先统计真实阅读分钟数", 1002 to "按有路径会话\n有打开记录就算一本", 1003 to "按Metadata最近访问\n按书库最近打开排序")
         val sourceNames = listOf(DataSourceMode.DURATION.name, DataSourceMode.PATH_SESSION.name, DataSourceMode.METADATA_ACCESS.name)
         sourceGroup = makeRadioGroup(sourceOptions, selectedId(prefs.getString("source_mode", DataSourceMode.DURATION.name) ?: DataSourceMode.DURATION.name, 1001, sourceOptions, sourceNames))
 
-        val wallpaperOptions = listOf(1201 to "统计壁纸", 1202 to "当前阅读封面(实验性,较耗电)", 1203 to "自动(熄屏优先封面)(实验性)")
+        val wallpaperOptions = listOf(1201 to "统计壁纸\n生成阅读账单图片", 1202 to "当前阅读封面\n尝试用最近书籍封面", 1203 to "自动封面优先\n有封面用封面，否则用账单")
         val wallpaperNames = listOf("STATS", "COVER", "AUTO_COVER")
         wallpaperModeGroup = makeRadioGroup(wallpaperOptions, selectedId(prefs.getString("wallpaper_mode", "STATS") ?: "STATS", 1201, wallpaperOptions, wallpaperNames))
 
-        val coverFitOptions = listOf(1211 to "完整显示", 1212 to "铺满裁切")
+        val coverFitOptions = listOf(1211 to "完整显示\n不裁掉封面", 1212 to "铺满裁切\n铺满屏幕边缘")
         val coverFitNames = listOf("FIT", "CROP")
         coverFitModeGroup = makeRadioGroup(coverFitOptions, selectedId(prefs.getString("cover_fit_mode", "FIT") ?: "FIT", 1211, coverFitOptions, coverFitNames), RadioGroup.HORIZONTAL)
 
-        val timeUnitOptions = listOf(2001 to "小时", 2002 to "分钟")
+        val timeUnitOptions = listOf(2001 to "小时\n自动显示x小时y分钟", 2002 to "分钟\n全部换算成分钟")
         val timeUnitNames = listOf("HOUR", "MINUTE")
         timeUnitGroup = makeRadioGroup(timeUnitOptions, selectedId(prefs.getString("time_unit", "HOUR") ?: "HOUR", 2001, timeUnitOptions, timeUnitNames), RadioGroup.HORIZONTAL)
 
-        val readingFilterOptions = listOf(6001 to "全部", 6002 to "仅在读", 6003 to "仅已读完")
+        val readingFilterOptions = listOf(6001 to "全部\n不按状态过滤", 6002 to "仅在读\n只显示没读完", 6003 to "仅已读完\n只显示已完成")
         val readingFilterNames = listOf(ReadingFilterMode.ALL.name, ReadingFilterMode.READING_ONLY.name, ReadingFilterMode.FINISHED_ONLY.name)
         readingFilterGroup = makeRadioGroup(readingFilterOptions, selectedId(prefs.getString("reading_filter_mode", ReadingFilterMode.ALL.name) ?: ReadingFilterMode.ALL.name, 6001, readingFilterOptions, readingFilterNames), RadioGroup.HORIZONTAL)
 
-        val progressOptions = listOf(6101 to "页数", 6102 to "百分比")
+        val progressOptions = listOf(6101 to "页数\n例如32/198", 6102 to "百分比\n例如16%")
         val progressNames = listOf("PAGES", "PERCENT")
         progressModeGroup = makeRadioGroup(progressOptions, selectedId(prefs.getString("progress_mode", "PAGES") ?: "PAGES", 6101, progressOptions, progressNames), RadioGroup.HORIZONTAL)
 
-        val serialOptions = listOf(2011 to "月日", 2012 to "随机", 2013 to "自定义")
+        val serialOptions = listOf(2011 to "月日\n自动用当前日期", 2012 to "随机\n每次生成变化", 2013 to "自定义\n手动固定数字")
         val serialNames = listOf("DATE", "RANDOM", "CUSTOM")
         serialModeGroup = makeRadioGroup(serialOptions, selectedId(prefs.getString("serial_number_mode", "DATE") ?: "DATE", 2011, serialOptions, serialNames), RadioGroup.HORIZONTAL)
 
-        val footerOptions = listOf(3001 to "不显示", 3002 to "只显示备注", 3003 to "显示条码 + 备注")
+        val footerOptions = listOf(3001 to "不显示\n底部留白更干净", 3002 to "只显示备注\n显示一句自定义文字", 3003 to "条码 + 备注\n增加票据装饰感")
         val footerNames = listOf("NONE", "NOTE", "BARCODE")
         footerModeGroup = makeRadioGroup(footerOptions, selectedId(prefs.getString("footer_mode", "NONE") ?: "NONE", 3001, footerOptions, footerNames))
 
-        val barcodeWidthOptions = listOf(3101 to "细(0.8x)", 3102 to "标准(1.0x)", 3103 to "粗(1.2x)")
+        val barcodeWidthOptions = listOf(3101 to "细(0.8x)\n更轻", 3102 to "标准(1.0x)\n默认", 3103 to "粗(1.2x)\n更醒目")
         val savedBarcodeWidth = when (prefs.getFloat("barcode_width_scale", 1.0f)) {
             0.8f -> 3101
             1.2f -> 3103
@@ -835,19 +837,19 @@ class MainActivity : AppCompatActivity() {
         }
         barcodeWidthGroup = makeRadioGroup(barcodeWidthOptions, savedBarcodeWidth, RadioGroup.HORIZONTAL)
 
-        val barcodeGapOptions = listOf(3111 to "紧凑", 3112 to "标准", 3113 to "疏松")
+        val barcodeGapOptions = listOf(3111 to "紧凑\n线条更密", 3112 to "标准\n推荐", 3113 to "疏松\n留白更多")
         val barcodeGapNames = listOf("TIGHT", "STANDARD", "LOOSE")
         barcodeGapGroup = makeRadioGroup(barcodeGapOptions, selectedId(prefs.getString("barcode_gap_mode", "STANDARD") ?: "STANDARD", 3112, barcodeGapOptions, barcodeGapNames))
 
-        val chartStyleOptions = listOf(7001 to "折线", 7002 to "柱状")
+        val chartStyleOptions = listOf(7001 to "折线\n看趋势", 7002 to "柱状\n看每天差异")
         val chartStyleNames = listOf(ChartStyleMode.LINE.name, ChartStyleMode.BAR.name)
         chartStyleGroup = makeRadioGroup(chartStyleOptions, selectedId(prefs.getString("chart_style_mode", ChartStyleMode.LINE.name) ?: ChartStyleMode.LINE.name, 7001, chartStyleOptions, chartStyleNames), RadioGroup.HORIZONTAL)
 
-        val yAxisOptions = listOf(7101 to "自动", 7102 to "固定")
+        val yAxisOptions = listOf(7101 to "自动\n按数据自己缩放", 7102 to "固定\n不同周期更好对比")
         val yAxisNames = listOf(YAxisMode.AUTO.name, YAxisMode.FIXED.name)
         yAxisModeGroup = makeRadioGroup(yAxisOptions, selectedId(prefs.getString("y_axis_mode", YAxisMode.AUTO.name) ?: YAxisMode.AUTO.name, 7101, yAxisOptions, yAxisNames), RadioGroup.HORIZONTAL)
 
-        val autoOptions = listOf(8001 to "每日定时一次（省电，推荐）", 8002 to "熄屏触发（更实时，较耗电）")
+        val autoOptions = listOf(8001 to "每日定时一次（推荐）\n省电，适合稳定更新", 8002 to "熄屏触发\n更及时，但更耗电")
         val autoNames = listOf(AutoRefreshConfig.MODE_DAILY, AutoRefreshConfig.MODE_SCREEN_OFF)
         autoModeGroup = makeRadioGroup(autoOptions, selectedId(prefs.getString(AutoRefreshConfig.KEY_AUTO_MODE, AutoRefreshConfig.MODE_DAILY) ?: AutoRefreshConfig.MODE_DAILY, 8001, autoOptions, autoNames))
 
@@ -876,11 +878,13 @@ class MainActivity : AppCompatActivity() {
 
         addSectionTitle("数据与统计", "周期、数据口径、时长单位与日期范围")
         val periodSegment = bindSegmented("统计周期", periodGroup, periodOptions, isVertical = false)
+        addHint("说明：选择账单统计哪一段时间；自定义模式会显示起止日期选择。")
         val sourceSegment = bindSegmented("数据口径", sourceGroup, sourceOptions, isVertical = true)
         val wallpaperModeSegment = bindSegmented("壁纸类型", wallpaperModeGroup, wallpaperOptions, isVertical = true)
-        val wallpaperModeHint = addHint("提示：封面模式依赖 NeoReader 元数据落库。通常需要先退出当前正在阅读的书籍再锁屏，才会刷新到最新封面；如果在书籍打开状态下直接锁屏，往往仍显示旧封面，通常下一次锁屏才会生效。")
+        val wallpaperModeHint = addHint("说明：统计壁纸最稳定；封面模式只读取本地书籍封面，不访问网络。提示：封面模式依赖 NeoReader 元数据落库。通常需要先退出当前正在阅读的书籍再锁屏，才会刷新到最新封面；如果在书籍打开状态下直接锁屏，往往仍显示旧封面，通常下一次锁屏才会生效。")
         val coverFitSegment = bindSegmented("封面显示方式", coverFitModeGroup, coverFitOptions, isVertical = false)
         val timeUnitSegment = bindSegmented("时长显示单位", timeUnitGroup, timeUnitOptions, isVertical = false)
+        addHint("说明：小时模式更适合壁纸阅读，分钟模式更适合精确核对。")
         val weekStartRow = bindInputRow("选择起始日期", { selectedWeekStartYmd.ifBlank { currentWeekStartYmd() } }) { openWeekStartDatePicker() }.first
         weekStartText = weekStartRow.getChildAt(1) as TextView
         val weekEndRow = bindInputRow("选择结束日期", { selectedWeekEndYmd.ifBlank { currentWeekEndYmd() } }) { openWeekEndDatePicker() }.first
@@ -888,20 +892,28 @@ class MainActivity : AppCompatActivity() {
 
         addSectionTitle("书单筛选", "控制展示书目与统计阈值")
         val includeUnreadRow = bindToggle("最近阅读包含未读（readingStatus=0）", includeUnreadCheck)
+        addHint("说明：关闭后会尽量排除只进过书库但没真正开始读的书。")
         val readingFilterSegment = bindSegmented("书单筛选（状态）", readingFilterGroup, readingFilterOptions, isVertical = false)
         val topNSlider = bindSlider("Top N（最多显示书籍数量）", topNInput, 1, 5)
+        addHint("说明：默认最多5本；如果底部还要显示图表和条码，3本会更宽松。")
         val minDurationSlider = bindSlider("最小时长阈值（分钟，作用于“按阅读时长事件”）", minDurationInput, 0, 240)
+        addHint("说明：小于这个时长的阅读事件会被忽略，可过滤误打开。")
 
         addSectionTitle("排版与字体", "标题、字号、进度与字体")
         val titleRow = bindEditRow("账单标题", titleInput)
+        addHint("说明：会显示在壁纸右上角，例如“阅读账单”或“留台单”。")
         val titleSizeSlider = bindSlider("标题字号", titleSizeInput, 24, 120)
         val bodySizeSlider = bindSlider("正文字号基准", bodySizeInput, 18, 60)
+        addHint("说明：字号会影响整张壁纸能放下多少内容；书多时建议调小。")
         val serialSegment = bindSegmented("单号数字模式", serialModeGroup, serialOptions, isVertical = false)
         val serialCustomRow = bindEditRow("自定义数字", serialCustomInput, numericOnly = true, maxDigits = 12)
         val serialSizeSlider = bindSlider("单号数字字号", serialNumberSizeInput, 24, 140)
+        addHint("说明：数字变大时会向上扩展，避免挤压下面的操作编号。")
         val progressStatusRow = bindToggle("显示进度和状态行", showProgressStatusCheck)
+        addHint("说明：关闭后书单更简洁，但看不到读到哪里。")
         val progressSegment = bindSegmented("进度显示方式", progressModeGroup, progressOptions, isVertical = false)
         val authorRow = bindToggle("显示作者行（在进度行上方）", showAuthorCheck)
+        addHint("说明：如果文石元数据里没有作者，会显示未知；关闭后可节省空间。")
         val titleFontRow = bindSpinnerRow("标题字体（系统字体）", titleFontSpinner)
         val bodyFontRow = bindSpinnerRow("正文字体（系统字体）", bodyFontSpinner)
         pickFontDirBtn = Button(this).apply {
@@ -912,6 +924,7 @@ class MainActivity : AppCompatActivity() {
         val fontDirRow = bindInputRow("选择字体目录（SAF）", { selectedFontDirUri?.let { "已选择 ▼" } ?: "未选择 ▼" }) {
             pickFontTreeLauncher.launch(null)
         }.first
+        addHint("说明：选择存储/Fonts 后，可在标题字体和正文字体里使用里面的 ttf/otf 字体。")
         fontScanText = TextView(this).apply {
             text = fontScanReport
             textSize = 13f
@@ -922,20 +935,24 @@ class MainActivity : AppCompatActivity() {
 
         addSectionTitle("图表", "图形样式与坐标设置")
         val chartToggleRow = bindToggle("显示下方周曲线图", showChartCheck)
+        addHint("说明：打开后能看到时间分布；如果书单或备注太多，可关闭节省空间。")
         val chartStyleSegment = bindSegmented("图表样式", chartStyleGroup, chartStyleOptions, isVertical = false)
         val chartRuleHint = addHint("图表横轴规则：当天/昨天=按小时；本周/上周/最近7天=按天；最近30天=按天；自定义<=14天按天，15-90天按周，>90天按月。")
         val peakLabelRow = bindToggle("显示峰值标签", showPeakLabelCheck)
         val yAxisSegment = bindSegmented("Y轴最大值", yAxisModeGroup, yAxisOptions, isVertical = false)
         val yAxisFixedSlider = bindSlider("Y轴固定最大值(分钟)", yAxisMaxInput, 1, 2000)
+        addHint("说明：固定值越大，柱子/曲线越矮；用于不同周期之间保持同一比例。")
 
         addSectionTitle("底部备注与条码", "备注文本与装饰条码参数")
         val footerSegment = bindSegmented("底部备注/条码", footerModeGroup, footerOptions, isVertical = true)
         val noteRow = bindEditRow("备注文本 / 条码内容", noteInput)
+        addHint("说明：备注会显示在底部；条码只是装饰风格，不保证所有扫码软件都能识别。")
         val barcodeWidthSegment = bindSegmented("条码粗细强度", barcodeWidthGroup, barcodeWidthOptions, isVertical = false)
         val barcodeGapSegment = bindSegmented("条码留白密度", barcodeGapGroup, barcodeGapOptions, isVertical = false)
 
         addSectionTitle("自动刷新", "默认自动模式，可切换定时或熄屏触发")
         val autoToggleRow = bindToggle("启用自动刷新与自动覆盖保存", autoRefreshCheck)
+        addHint("说明：开启后 App 会按自动模式覆盖保存同一张壁纸图片。")
         val autoModeSegment = bindSegmented("自动刷新模式", autoModeGroup, autoOptions, isVertical = true)
         val autoDailyRow = bindInputRow("每日执行时间", { normalizeDailyTime(autoDailyTimeInput.text.toString()) }) { openDailyTimePicker() }.first
         val autoDailyValue = autoDailyRow.getChildAt(1) as TextView
@@ -945,6 +962,7 @@ class MainActivity : AppCompatActivity() {
             override fun afterTextChanged(s: Editable?) {}
         })
         val autoMinIntervalSlider = bindSlider("熄屏触发最小间隔(分钟)", autoMinIntervalInput, 1, 240)
+        addHint("说明：间隔越短越及时，也越容易增加耗电；3分钟是折中值。")
         autoModeHintText = TextView(this).apply {
             textSize = 13f
             setTextColor(Color.DKGRAY)
