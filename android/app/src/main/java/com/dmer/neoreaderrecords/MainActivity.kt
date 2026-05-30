@@ -112,6 +112,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var previewImage: ImageView
     private lateinit var previewText: TextView
 
+    private var currentPageKey: String = "settings"
+    private var updateTopNavState: (() -> Unit)? = null
     private var lastSavedPath: String? = null
     private var previewBitmap: Bitmap? = null
     private var isInitializingUi: Boolean = false
@@ -295,66 +297,92 @@ class MainActivity : AppCompatActivity() {
             setPadding(24, 24, 24, 24)
             setBackgroundColor(Color.WHITE)
         }
-        fun styleEinkButton(btn: Button) {
-            val bg = GradientDrawable().apply {
+        fun inkBorder(stroke: Int = 4, fill: Int = Color.WHITE): GradientDrawable {
+            return GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
-                setColor(Color.WHITE)
-                setStroke(3, Color.BLACK)
-                cornerRadius = 6f
+                setColor(fill)
+                setStroke(stroke, Color.BLACK)
             }
-            btn.background = bg
-            btn.setTextColor(Color.BLACK)
-            btn.textSize = 16f
-            btn.minHeight = 92
+        }
+        fun makeNavItem(textValue: String, key: String, onTap: () -> Unit): TextView {
+            return TextView(this).apply {
+                text = textValue
+                textSize = 18f
+                gravity = Gravity.CENTER
+                setTypeface(Typeface.DEFAULT_BOLD)
+                setPadding(12, 22, 12, 22)
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                setOnClickListener {
+                    currentPageKey = key
+                    onTap()
+                }
+            }
+        }
+        fun makeActionItem(textValue: String, primary: Boolean, onTap: () -> Unit): TextView {
+            return TextView(this).apply {
+                text = textValue
+                textSize = 18f
+                gravity = Gravity.CENTER
+                setTypeface(Typeface.DEFAULT_BOLD)
+                setTextColor(if (primary) Color.WHITE else Color.BLACK)
+                background = inkBorder(4, if (primary) Color.BLACK else Color.WHITE)
+                setPadding(12, 22, 12, 22)
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    setMargins(0, 0, 12, 0)
+                }
+                setOnClickListener { onTap() }
+            }
+        }
+        fun dividerVertical(): View = View(this).apply {
+            setBackgroundColor(Color.BLACK)
+            layoutParams = LinearLayout.LayoutParams(4, ViewGroup.LayoutParams.MATCH_PARENT)
         }
 
-        val topBar = LinearLayout(this).apply {
+        val navGroup = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(0, 0, 0, 10)
+            background = inkBorder(4)
+            setPadding(0, 0, 0, 0)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                setMargins(0, 0, 0, 16)
+            }
         }
-        val btnSettings = Button(this).apply {
-            text = "设置"
-            setOnClickListener { showSettingsPage() }
-        }
-        val btnPreview = Button(this).apply {
-            text = "预览"
-            setOnClickListener { showPreviewPage() }
-        }
-        val btnRefreshPreview = Button(this).apply {
-            text = "刷新预览"
-            setOnClickListener { refreshPreviewData() }
-        }
-        val btnGenerateWallpaper = Button(this).apply {
-            text = "生成壁纸"
-            setOnClickListener { generateAndSaveFromCurrentSettings() }
-        }
-        val btnEinkUi = Button(this).apply {
-            text = "新UI"
-            setOnClickListener { showEinkUiPage() }
-        }
-        styleEinkButton(btnSettings)
-        styleEinkButton(btnPreview)
-        styleEinkButton(btnRefreshPreview)
-        styleEinkButton(btnGenerateWallpaper)
-        styleEinkButton(btnEinkUi)
+        val navSettings = makeNavItem("设置", "settings") { showSettingsPage() }
+        val navPreview = makeNavItem("预览", "preview") { showPreviewPage() }
+        val refreshAction = makeActionItem("刷新预览", false) { refreshPreviewData() }
+        val generateAction = makeActionItem("生成壁纸", true) { generateAndSaveFromCurrentSettings() }
+        refreshAction.background = null
+        refreshAction.setTextColor(Color.BLACK)
+        refreshAction.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        generateAction.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        navGroup.addView(navSettings)
+        navGroup.addView(dividerVertical())
+        navGroup.addView(navPreview)
+        navGroup.addView(dividerVertical())
+        navGroup.addView(refreshAction)
+        navGroup.addView(dividerVertical())
+        navGroup.addView(generateAction)
+
         changeStateText = TextView(this).apply {
-            text = "状态: 初始化"
-            textSize = 12f
-            setPadding(20, 14, 0, 0)
+            text = "状态：初始化"
+            textSize = 13f
+            setPadding(4, 0, 4, 18)
             setTextColor(Color.DKGRAY)
         }
-        topBar.addView(btnSettings)
-        topBar.addView(btnPreview)
-        topBar.addView(btnRefreshPreview)
-        topBar.addView(btnGenerateWallpaper)
-        topBar.addView(btnEinkUi)
-        topBar.addView(changeStateText)
+        updateTopNavState = {
+            val items = listOf("settings" to navSettings, "preview" to navPreview)
+            items.forEach { (key, item) ->
+                val selected = currentPageKey == key
+                item.setTextColor(if (selected) Color.WHITE else Color.BLACK)
+                item.setBackgroundColor(if (selected) Color.BLACK else Color.TRANSPARENT)
+            }
+        }
 
         settingsPage = buildSettingsPage(prefs)
         previewPage = buildPreviewPage()
         einkUiPage = buildEinkUiPage()
 
-        root.addView(topBar)
+        root.addView(navGroup)
+        root.addView(changeStateText)
         root.addView(settingsPage, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         root.addView(previewPage, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         root.addView(einkUiPage, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
@@ -1564,22 +1592,28 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showSettingsPage() {
+        currentPageKey = "settings"
         settingsPage.visibility = View.VISIBLE
         previewPage.visibility = View.GONE
         einkUiPage.visibility = View.GONE
+        updateTopNavState?.invoke()
     }
 
     private fun showPreviewPage() {
+        currentPageKey = "preview"
         settingsPage.visibility = View.GONE
         previewPage.visibility = View.VISIBLE
         einkUiPage.visibility = View.GONE
+        updateTopNavState?.invoke()
         refreshPreview()
     }
 
     private fun showEinkUiPage() {
+        currentPageKey = "eink"
         settingsPage.visibility = View.GONE
         previewPage.visibility = View.GONE
         einkUiPage.visibility = View.VISIBLE
+        updateTopNavState?.invoke()
     }
 
     private fun refreshPreviewData() {
