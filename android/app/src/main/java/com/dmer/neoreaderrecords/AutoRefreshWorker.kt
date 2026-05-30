@@ -29,22 +29,15 @@ class AutoRefreshWorker(context: Context, params: WorkerParameters) : Worker(con
         var latestBookKey = ""
 
         if (wallpaperMode == "COVER") {
-            // 封面模式：
-            // 1) screen_off：每次都生成，保证锁屏时尽量拿到新封面；
-            // 2) 其他触发源：基于最新书籍标识去重，避免高频重复生成。
+            // 封面模式：基于最新阅读书籍标识进行防抖（书没变绝不生成，书变了无视时间立刻生成）
             latestBookKey = getLatestBookIdentifier(applicationContext)
             val lastBookKey = prefs.getString("auto_last_book_key", "") ?: ""
-            if (reason == "screen_off") {
-                AutoRefreshLog.i(applicationContext, "Worker force generation: COVER mode screen_off")
-                shouldGenerate = true
+            if (latestBookKey.isNotBlank() && latestBookKey == lastBookKey) {
+                AutoRefreshLog.i(applicationContext, "Worker skip: COVER mode book unchanged ($latestBookKey)")
+                shouldGenerate = false
             } else {
-                if (latestBookKey.isNotBlank() && latestBookKey == lastBookKey) {
-                    AutoRefreshLog.i(applicationContext, "Worker skip: COVER mode book unchanged ($latestBookKey)")
-                    shouldGenerate = false
-                } else {
-                    AutoRefreshLog.i(applicationContext, "Worker force generation: book changed from [$lastBookKey] to [$latestBookKey]")
-                    shouldGenerate = true
-                }
+                AutoRefreshLog.i(applicationContext, "Worker force generation: book changed from [$lastBookKey] to [$latestBookKey]")
+                shouldGenerate = true
             }
         } else {
             // 统计模式：基于配置的时间进行严格防抖
