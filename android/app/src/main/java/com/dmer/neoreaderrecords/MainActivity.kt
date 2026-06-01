@@ -13,18 +13,23 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
 import android.provider.DocumentsContract
+import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.app.AlertDialog
 import android.app.DatePickerDialog
 import android.app.TimePickerDialog
 import android.text.Editable
+import android.text.InputType
 import android.text.TextWatcher
 import android.widget.ArrayAdapter
 import android.widget.AdapterView
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
+import android.widget.GridLayout
 import android.widget.ImageView
+import android.widget.SeekBar
 import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
@@ -32,7 +37,7 @@ import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.appcompat.app.AppCompatActivity
+import androidx.activity.ComponentActivity
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.MultiFormatWriter
@@ -46,7 +51,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 
-class MainActivity : AppCompatActivity() {
+class MainActivity : ComponentActivity() {
     companion object {
         private const val FONT_ENTRY_SEP = "@@"
     }
@@ -92,9 +97,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var autoModeGroup: RadioGroup
     private lateinit var autoDailyTimeInput: EditText
     private lateinit var autoMinIntervalInput: EditText
-    private lateinit var autoContentObserverCheck: CheckBox
-    private lateinit var autoScreenOnPrewarmCheck: CheckBox
     private lateinit var autoModeHintText: TextView
+    private lateinit var autoStateText: TextView
     private lateinit var pickFontDirBtn: Button
     private lateinit var titleFontSpinner: Spinner
     private lateinit var bodyFontSpinner: Spinner
@@ -104,9 +108,12 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var settingsPage: View
     private lateinit var previewPage: View
+    private lateinit var einkUiPage: View
     private lateinit var previewImage: ImageView
     private lateinit var previewText: TextView
 
+    private var currentPageKey: String = "settings"
+    private var updateTopNavState: (() -> Unit)? = null
     private var lastSavedPath: String? = null
     private var previewBitmap: Bitmap? = null
     private var isInitializingUi: Boolean = false
@@ -207,6 +214,7 @@ class MainActivity : AppCompatActivity() {
         if (!isInitializingUi) {
             validateFontTreePermission()
             reloadFontsFromSources()
+            updateAutoRuntimeState()
             writeDebugLog("onResume_rescan")
         }
     }
@@ -289,61 +297,95 @@ class MainActivity : AppCompatActivity() {
             setPadding(24, 24, 24, 24)
             setBackgroundColor(Color.WHITE)
         }
-        fun styleEinkButton(btn: Button) {
-            val bg = GradientDrawable().apply {
+        fun inkBorder(stroke: Int = 4, fill: Int = Color.WHITE): GradientDrawable {
+            return GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
-                setColor(Color.WHITE)
-                setStroke(3, Color.BLACK)
-                cornerRadius = 6f
+                setColor(fill)
+                setStroke(stroke, Color.BLACK)
             }
-            btn.background = bg
-            btn.setTextColor(Color.BLACK)
-            btn.textSize = 16f
-            btn.minHeight = 92
+        }
+        fun makeNavItem(textValue: String, key: String, onTap: () -> Unit): TextView {
+            return TextView(this).apply {
+                text = textValue
+                textSize = 18f
+                gravity = Gravity.CENTER
+                setTypeface(Typeface.DEFAULT_BOLD)
+                setPadding(12, 22, 12, 22)
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                setOnClickListener {
+                    currentPageKey = key
+                    onTap()
+                }
+            }
+        }
+        fun makeActionItem(textValue: String, primary: Boolean, onTap: () -> Unit): TextView {
+            return TextView(this).apply {
+                text = textValue
+                textSize = 18f
+                gravity = Gravity.CENTER
+                setTypeface(Typeface.DEFAULT_BOLD)
+                setTextColor(if (primary) Color.WHITE else Color.BLACK)
+                background = inkBorder(4, if (primary) Color.BLACK else Color.WHITE)
+                setPadding(12, 22, 12, 22)
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    setMargins(0, 0, 12, 0)
+                }
+                setOnClickListener { onTap() }
+            }
+        }
+        fun dividerVertical(): View = View(this).apply {
+            setBackgroundColor(Color.BLACK)
+            layoutParams = LinearLayout.LayoutParams(4, ViewGroup.LayoutParams.MATCH_PARENT)
         }
 
-        val topBar = LinearLayout(this).apply {
+        val navGroup = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(0, 0, 0, 10)
+            background = inkBorder(4)
+            setPadding(0, 0, 0, 0)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                setMargins(0, 0, 0, 16)
+            }
         }
-        val btnSettings = Button(this).apply {
-            text = "设置"
-            setOnClickListener { showSettingsPage() }
-        }
-        val btnPreview = Button(this).apply {
-            text = "预览"
-            setOnClickListener { showPreviewPage() }
-        }
-        val btnRefreshPreview = Button(this).apply {
-            text = "刷新预览"
-            setOnClickListener { refreshPreviewData() }
-        }
-        val btnGenerateWallpaper = Button(this).apply {
-            text = "生成壁纸"
-            setOnClickListener { generateAndSaveFromCurrentSettings() }
-        }
-        styleEinkButton(btnSettings)
-        styleEinkButton(btnPreview)
-        styleEinkButton(btnRefreshPreview)
-        styleEinkButton(btnGenerateWallpaper)
+        val navSettings = makeNavItem("设置", "settings") { showSettingsPage() }
+        val navPreview = makeNavItem("预览", "preview") { showPreviewPage() }
+        val refreshAction = makeActionItem("刷新预览", false) { refreshPreviewData() }
+        val generateAction = makeActionItem("生成壁纸", true) { generateAndSaveFromCurrentSettings() }
+        refreshAction.background = null
+        refreshAction.setTextColor(Color.BLACK)
+        refreshAction.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        generateAction.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        navGroup.addView(navSettings)
+        navGroup.addView(dividerVertical())
+        navGroup.addView(navPreview)
+        navGroup.addView(dividerVertical())
+        navGroup.addView(refreshAction)
+        navGroup.addView(dividerVertical())
+        navGroup.addView(generateAction)
+
         changeStateText = TextView(this).apply {
-            text = "状态: 初始化"
-            textSize = 12f
-            setPadding(20, 14, 0, 0)
+            text = "状态：初始化"
+            textSize = 13f
+            setPadding(4, 0, 4, 18)
             setTextColor(Color.DKGRAY)
         }
-        topBar.addView(btnSettings)
-        topBar.addView(btnPreview)
-        topBar.addView(btnRefreshPreview)
-        topBar.addView(btnGenerateWallpaper)
-        topBar.addView(changeStateText)
+        updateTopNavState = {
+            val items = listOf("settings" to navSettings, "preview" to navPreview)
+            items.forEach { (key, item) ->
+                val selected = currentPageKey == key
+                item.setTextColor(if (selected) Color.WHITE else Color.BLACK)
+                item.setBackgroundColor(if (selected) Color.BLACK else Color.TRANSPARENT)
+            }
+        }
 
         settingsPage = buildSettingsPage(prefs)
         previewPage = buildPreviewPage()
+        einkUiPage = buildEinkUiPage()
 
-        root.addView(topBar)
+        root.addView(navGroup)
+        root.addView(changeStateText)
         root.addView(settingsPage, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         root.addView(previewPage, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        root.addView(einkUiPage, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 
         setContentView(root)
         showSettingsPage()
@@ -353,535 +395,642 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun buildSettingsPage(prefs: android.content.SharedPreferences): View {
-        val scroll = ScrollView(this)
-        val container = LinearLayout(this).apply {
+        val scroll = ScrollView(this).apply { setBackgroundColor(Color.WHITE) }
+        val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(12, 24, 12, 24)
+            setPadding(32, 40, 32, 80)
         }
-        fun styleEinkButton(btn: Button) {
-            val bg = GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE
-                setColor(Color.WHITE)
-                setStroke(3, Color.BLACK)
-                cornerRadius = 6f
-            }
-            btn.background = bg
-            btn.setTextColor(Color.BLACK)
-            btn.textSize = 14f
-            btn.minHeight = 86
+        val hiddenHost = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
         }
 
-        val title = TextView(this).apply {
-            text = "阅读壁纸设置"
-            textSize = 24f
-            setTypeface(typeface, Typeface.BOLD)
+        fun inkBorder(stroke: Int = 4): GradientDrawable {
+            return GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                setColor(Color.WHITE)
+                setStroke(stroke, Color.BLACK)
+            }
         }
-        val sectionContents = mutableListOf<LinearLayout>()
-        fun section(
-            titleText: String,
-            desc: String,
-            defaultExpanded: Boolean,
-            onReset: (() -> Unit)? = null
-        ): Pair<LinearLayout, LinearLayout> {
-            val box = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(22, 18, 22, 18)
-                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                    setMargins(0, 0, 0, 14)
-                }
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.RECTANGLE
-                    setColor(Color.WHITE)
-                    setStroke(3, Color.BLACK)
-                    cornerRadius = 8f
-                }
+
+        fun createDivider(thickness: Int = 4, topMargin: Int = 0, bottomMargin: Int = 24) = View(this).apply {
+            setBackgroundColor(Color.BLACK)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, thickness).apply {
+                setMargins(0, topMargin, 0, bottomMargin)
             }
-            val headerRow = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-            }
-            val header = TextView(this).apply {
-                text = titleText
-                textSize = 18f
-                setTypeface(typeface, Typeface.BOLD)
-            }
-            val resetBtn = Button(this).apply {
-                text = "重置本组"
-                visibility = if (onReset == null) View.GONE else View.VISIBLE
-                setOnClickListener { onReset?.invoke() }
-            }
-            styleEinkButton(resetBtn)
-            headerRow.addView(header, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            headerRow.addView(resetBtn)
-            box.addView(headerRow)
-            box.addView(TextView(this).apply {
-                text = desc
-                textSize = 11f
-                setTextColor(Color.DKGRAY)
-            })
-            val content = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(0, 10, 0, 0)
-            }
-            box.addView(content)
-            sectionContents.add(content)
-            var expanded = defaultExpanded
-            header.setOnClickListener {
-                expanded = !expanded
-                content.visibility = if (expanded) View.VISIBLE else View.GONE
-                header.text = if (expanded) "$titleText  ▾" else "$titleText  ▸"
-            }
-            header.text = "$titleText  ▾"
-            content.visibility = if (expanded) View.VISIBLE else View.GONE
-            if (!expanded) header.text = "$titleText  ▸"
-            return box to content
         }
-        fun numberControl(label: String, target: EditText, min: Int, max: Int): LinearLayout {
-            val wrap = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            wrap.addView(TextView(this).apply { text = label })
-            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            val minus = Button(this).apply { text = "-" }
-            val plus = Button(this).apply { text = "+" }
-            styleEinkButton(minus)
-            styleEinkButton(plus)
-            val value = TextView(this).apply {
-                textSize = 18f
-                setTypeface(typeface, Typeface.BOLD)
-                setPadding(24, 8, 24, 8)
+
+        fun addSectionTitle(text: String, hint: String? = null) {
+            root.addView(TextView(this).apply {
+                this.text = text
+                textSize = 24f
                 setTextColor(Color.BLACK)
+                setTypeface(Typeface.DEFAULT_BOLD)
+                setPadding(0, 48, 0, if (hint == null) 16 else 6)
+            })
+            if (hint != null) {
+                root.addView(TextView(this).apply {
+                    this.text = hint
+                    textSize = 14f
+                    setTextColor(Color.DKGRAY)
+                    setPadding(0, 0, 0, 24)
+                })
             }
-            fun setValue(v: Int) {
-                val nv = v.coerceIn(min, max)
-                target.setText(nv.toString())
-                value.text = nv.toString()
+            root.addView(createDivider(4, 0, 32))
+        }
+
+        fun addHint(hint: String): TextView {
+            return TextView(this).apply {
+                text = hint
+                textSize = 13f
+                setTextColor(Color.DKGRAY)
+                setPadding(0, 0, 0, 16)
+                root.addView(this)
             }
-            val initial = target.text.toString().trim().toIntOrNull()?.coerceIn(min, max) ?: min
-            setValue(initial)
-            minus.setOnClickListener { setValue((target.text.toString().toIntOrNull() ?: initial) - 1) }
-            plus.setOnClickListener { setValue((target.text.toString().toIntOrNull() ?: initial) + 1) }
-            row.addView(minus)
-            row.addView(value, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            row.addView(plus)
-            wrap.addView(row)
+        }
+
+        fun makeCheck(checked: Boolean): CheckBox {
+            return CheckBox(this).apply {
+                isChecked = checked
+                hiddenHost.addView(this)
+            }
+        }
+
+        fun makeInput(text: String): EditText {
+            return EditText(this).apply {
+                setText(text)
+                hiddenHost.addView(this)
+            }
+        }
+
+        fun makeRadioGroup(options: List<Pair<Int, String>>, selectedId: Int, orientation: Int = RadioGroup.VERTICAL): RadioGroup {
+            return RadioGroup(this).apply {
+                this.orientation = orientation
+                options.forEach { (id, label) ->
+                    addView(RadioButton(context).apply {
+                        this.id = id
+                        text = label
+                    })
+                }
+                check(selectedId)
+                hiddenHost.addView(this)
+            }
+        }
+
+        fun selectedId(saved: String, fallback: Int, pairs: List<Pair<Int, String>>, names: List<String>): Int {
+            val index = names.indexOf(saved)
+            return if (index >= 0) pairs.getOrNull(index)?.first ?: fallback else fallback
+        }
+
+        fun bindToggle(label: String, check: CheckBox): LinearLayout {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, 16, 0, 32)
+            }
+            row.addView(TextView(this).apply {
+                text = label
+                textSize = 20f
+                setTextColor(Color.BLACK)
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            })
+            val box = LinearLayout(this).apply {
+                layoutParams = LinearLayout.LayoutParams(64, 64)
+                setPadding(12, 12, 12, 12)
+                background = inkBorder(4)
+            }
+            val inner = View(this).apply {
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            }
+            fun render() { inner.setBackgroundColor(if (check.isChecked) Color.BLACK else Color.TRANSPARENT) }
+            render()
+            box.addView(inner)
+            row.addView(box)
+            row.setOnClickListener {
+                check.isChecked = !check.isChecked
+                render()
+            }
+            root.addView(row)
+            return row
+        }
+
+        fun bindSegmented(
+            label: String,
+            group: RadioGroup,
+            options: List<Pair<Int, String>>,
+            isVertical: Boolean = false
+        ): LinearLayout {
+            val wrap = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, 0, 0, 0)
+            }
+            wrap.addView(TextView(this).apply {
+                text = label
+                textSize = 20f
+                setTextColor(Color.BLACK)
+                setPadding(0, 16, 0, 16)
+            })
+            val allViews = mutableListOf<Pair<Int, TextView>>()
+            fun render() {
+                allViews.forEach { (id, tv) ->
+                    val selected = group.checkedRadioButtonId == id
+                    tv.setBackgroundColor(if (selected) Color.BLACK else Color.TRANSPARENT)
+                    tv.setTextColor(if (selected) Color.WHITE else Color.BLACK)
+                }
+            }
+            if (isVertical) {
+                val segmented = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    background = inkBorder(4)
+                    layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                        setMargins(0, 0, 0, 32)
+                    }
+                }
+                options.forEachIndexed { index, (id, text) ->
+                    val tv = TextView(this).apply {
+                        this.text = text
+                        textSize = if (text.contains("\n")) 16f else 18f
+                        setTypeface(Typeface.DEFAULT_BOLD)
+                        setLineSpacing(4f, 1.0f)
+                        setPadding(32, 24, 32, 24)
+                        setOnClickListener {
+                            group.check(id)
+                            render()
+                        }
+                    }
+                    allViews.add(id to tv)
+                    segmented.addView(tv)
+                    if (index < options.size - 1) {
+                        segmented.addView(View(this).apply {
+                            setBackgroundColor(Color.BLACK)
+                            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 4)
+                        })
+                    }
+                }
+                wrap.addView(segmented)
+            } else {
+                val segmented = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    background = inkBorder(4)
+                    layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                        setMargins(0, 0, 0, 32)
+                    }
+                }
+                options.chunked(3).forEachIndexed { rowIndex, rowOptions ->
+                    val row = LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                    }
+                    rowOptions.forEachIndexed { colIndex, (id, text) ->
+                        val tv = TextView(this).apply {
+                            this.text = text
+                            textSize = if (text.contains("\n")) 13f else 16f
+                            setTypeface(Typeface.DEFAULT_BOLD)
+                            gravity = Gravity.CENTER
+                            setLineSpacing(4f, 1.0f)
+                            setPadding(12, 20, 12, 20)
+                            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                            setOnClickListener {
+                                group.check(id)
+                                render()
+                            }
+                        }
+                        allViews.add(id to tv)
+                        row.addView(tv)
+                        if (colIndex < rowOptions.size - 1) {
+                            row.addView(View(this).apply {
+                                setBackgroundColor(Color.BLACK)
+                                layoutParams = LinearLayout.LayoutParams(4, ViewGroup.LayoutParams.MATCH_PARENT)
+                            })
+                        }
+                    }
+                    while (rowOptions.size < 3 && row.childCount < 5) {
+                        row.addView(View(this).apply {
+                            setBackgroundColor(Color.BLACK)
+                            layoutParams = LinearLayout.LayoutParams(4, ViewGroup.LayoutParams.MATCH_PARENT)
+                        })
+                        row.addView(View(this).apply {
+                            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                        })
+                    }
+                    segmented.addView(row)
+                    if (rowIndex < options.chunked(3).size - 1) {
+                        segmented.addView(View(this).apply {
+                            setBackgroundColor(Color.BLACK)
+                            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 4)
+                        })
+                    }
+                }
+                wrap.addView(segmented)
+            }
+            render()
+            root.addView(wrap)
             return wrap
         }
 
-        includeUnreadCheck = CheckBox(this).apply {
-            text = "最近阅读包含未读（readingStatus=0）"
-            isChecked = prefs.getBoolean("include_unread", false)
-        }
-        val periodLabel = TextView(this).apply { text = "统计周期" }
-        periodGroup = RadioGroup(this).apply {
-            orientation = RadioGroup.VERTICAL
-            val saved = prefs.getString("period_mode", PeriodMode.THIS_WEEK.name) ?: PeriodMode.THIS_WEEK.name
-            addView(RadioButton(context).apply { id = 4000; text = "当天"; isChecked = saved == PeriodMode.TODAY.name })
-            addView(RadioButton(context).apply { id = 4006; text = "昨天"; isChecked = saved == PeriodMode.YESTERDAY.name })
-            addView(RadioButton(context).apply { id = 4001; text = "本周"; isChecked = saved == PeriodMode.THIS_WEEK.name })
-            addView(RadioButton(context).apply { id = 4002; text = "上周"; isChecked = saved == PeriodMode.LAST_WEEK.name })
-            addView(RadioButton(context).apply { id = 4003; text = "最近7天"; isChecked = saved == PeriodMode.LAST_7_DAYS.name })
-            addView(RadioButton(context).apply { id = 4004; text = "最近30天"; isChecked = saved == PeriodMode.LAST_30_DAYS.name })
-            addView(RadioButton(context).apply { id = 4005; text = "自定义起止"; isChecked = saved == PeriodMode.CUSTOM.name })
-        }
-        titleInput = EditText(this).apply {
-            hint = "账单标题"
-            setText(prefs.getString("receipt_title", "阅读账单") ?: "阅读账单")
-        }
-        val titleSizeLabel = TextView(this).apply { text = "标题字号（24-120）" }
-        titleSizeInput = EditText(this).apply {
-            hint = "例如 74"
-            setText((prefs.getFloat("receipt_title_size", 74f)).toInt().toString())
-        }
-        val bodySizeLabel = TextView(this).apply { text = "正文字号基准（18-60）" }
-        bodySizeInput = EditText(this).apply {
-            hint = "例如 34"
-            setText((prefs.getFloat("receipt_body_size", 34f)).toInt().toString())
-        }
-        showProgressStatusCheck = CheckBox(this).apply {
-            text = "显示进度和状态行"
-            isChecked = prefs.getBoolean("show_progress_status", true)
-        }
-        val progressModeLabel = TextView(this).apply { text = "进度显示方式" }
-        progressModeGroup = RadioGroup(this).apply {
-            orientation = RadioGroup.HORIZONTAL
-            val saved = prefs.getString("progress_mode", "PAGES") ?: "PAGES"
-            addView(RadioButton(context).apply { id = 6101; text = "页数"; isChecked = saved == "PAGES" })
-            addView(RadioButton(context).apply { id = 6102; text = "百分比"; isChecked = saved == "PERCENT" })
-        }
-        showAuthorCheck = CheckBox(this).apply {
-            text = "显示作者行（在进度行上方）"
-            isChecked = prefs.getBoolean("show_author", true)
-        }
-        showChartCheck = CheckBox(this).apply {
-            text = "显示下方周曲线图"
-            isChecked = prefs.getBoolean("show_chart", true)
-        }
-
-        val sourceLabel = TextView(this).apply { text = "数据口径" }
-        sourceGroup = RadioGroup(this).apply {
-            orientation = RadioGroup.VERTICAL
-            val saved = prefs.getString("source_mode", DataSourceMode.DURATION.name) ?: DataSourceMode.DURATION.name
-            addView(RadioButton(context).apply { id = 1001; text = "按阅读时长事件（推荐）"; isChecked = saved == DataSourceMode.DURATION.name })
-            addView(RadioButton(context).apply { id = 1002; text = "按有路径会话"; isChecked = saved == DataSourceMode.PATH_SESSION.name })
-            addView(RadioButton(context).apply { id = 1003; text = "按Metadata最近访问"; isChecked = saved == DataSourceMode.METADATA_ACCESS.name })
-        }
-        val wallpaperModeLabel = TextView(this).apply { text = "壁纸类型" }
-        wallpaperModeGroup = RadioGroup(this).apply {
-            orientation = RadioGroup.VERTICAL
-            val saved = prefs.getString("wallpaper_mode", "STATS") ?: "STATS"
-            addView(RadioButton(context).apply { id = 1201; text = "统计壁纸"; isChecked = saved == "STATS" })
-            addView(RadioButton(context).apply { id = 1202; text = "当前阅读封面(实验性,较耗电)"; isChecked = saved == "COVER" })
-            addView(RadioButton(context).apply { id = 1203; text = "自动(熄屏优先封面)(实验性,较耗电)"; isChecked = saved == "AUTO_COVER" })
-        }
-        val coverFitModeLabel = TextView(this).apply { text = "封面显示方式" }
-        coverFitModeGroup = RadioGroup(this).apply {
-            orientation = RadioGroup.HORIZONTAL
-            val saved = prefs.getString("cover_fit_mode", "FIT") ?: "FIT"
-            addView(RadioButton(context).apply { id = 1211; text = "完整显示"; isChecked = saved == "FIT" })
-            addView(RadioButton(context).apply { id = 1212; text = "铺满裁切"; isChecked = saved == "CROP" })
+        fun bindSlider(label: String, target: EditText, min: Int, max: Int): LinearLayout {
+            val wrap = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, 16, 0, 32)
+            }
+            val headerRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            headerRow.addView(TextView(this).apply {
+                text = label
+                textSize = 20f
+                setTextColor(Color.BLACK)
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            })
+            val valueText = TextView(this).apply {
+                textSize = 24f
+                setTypeface(Typeface.DEFAULT_BOLD)
+                setTextColor(Color.BLACK)
+            }
+            var bar: SeekBar? = null
+            fun setValue(v: Int, fromSeek: Boolean = false) {
+                val next = v.coerceIn(min, max)
+                valueText.text = next.toString()
+                if (target.text.toString() != next.toString()) {
+                    target.setText(next.toString())
+                    target.setSelection(target.text.length)
+                }
+                if (!fromSeek) bar?.progress = next - min
+            }
+            headerRow.addView(valueText)
+            wrap.addView(headerRow)
+            val initial = target.text.toString().trim().toIntOrNull()?.coerceIn(min, max) ?: min
+            bar = SeekBar(this).apply {
+                this.max = max - min
+                progress = initial - min
+                setPadding(0, 32, 0, 32)
+                progressDrawable?.setTint(Color.BLACK)
+                thumb?.setTint(Color.BLACK)
+                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                        if (fromUser) setValue(progress + min, fromSeek = true)
+                        else valueText.text = (progress + min).toString()
+                    }
+                    override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+                    override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+                })
+            }
+            setValue(initial)
+            target.addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    val v = s?.toString()?.trim()?.toIntOrNull()?.coerceIn(min, max) ?: min
+                    valueText.text = v.toString()
+                    if (bar?.progress != v - min) bar?.progress = v - min
+                }
+                override fun afterTextChanged(s: Editable?) {}
+            })
+            bar?.let { wrap.addView(it) }
+            root.addView(wrap)
+            return wrap
         }
 
-        val minDurationLabel = TextView(this).apply {
-            text = "最小时长阈值（分钟，作用于“按阅读时长事件”）"
-        }
-        minDurationInput = EditText(this).apply {
-            hint = "例如 1"
-            setText(prefs.getInt("min_duration_minutes", 1).toString())
-        }
-        val topNLabel = TextView(this).apply { text = "Top N（最多显示书籍数量）" }
-        topNInput = EditText(this).apply {
-            hint = "TopN(1-5)"
-            setText(prefs.getInt("top_n", 5).coerceIn(1, 5).toString())
-        }
-        val readingFilterLabel = TextView(this).apply { text = "书单筛选（状态）" }
-        readingFilterGroup = RadioGroup(this).apply {
-            orientation = RadioGroup.HORIZONTAL
-            val saved = prefs.getString("reading_filter_mode", ReadingFilterMode.ALL.name) ?: ReadingFilterMode.ALL.name
-            addView(RadioButton(context).apply { id = 6001; text = "全部"; isChecked = saved == ReadingFilterMode.ALL.name })
-            addView(RadioButton(context).apply { id = 6002; text = "仅在读"; isChecked = saved == ReadingFilterMode.READING_ONLY.name })
-            addView(RadioButton(context).apply { id = 6003; text = "仅已读完"; isChecked = saved == ReadingFilterMode.FINISHED_ONLY.name })
-        }
-
-        val timeUnitLabel = TextView(this).apply { text = "时长显示单位" }
-        timeUnitGroup = RadioGroup(this).apply {
-            orientation = RadioGroup.HORIZONTAL
-            val saved = prefs.getString("time_unit", "HOUR") ?: "HOUR"
-            addView(RadioButton(context).apply { id = 2001; text = "小时"; isChecked = saved == "HOUR" })
-            addView(RadioButton(context).apply { id = 2002; text = "分钟"; isChecked = saved == "MINUTE" })
-        }
-        val serialModeLabel = TextView(this).apply { text = "单号数字模式" }
-        serialModeGroup = RadioGroup(this).apply {
-            orientation = RadioGroup.HORIZONTAL
-            val saved = prefs.getString("serial_number_mode", "DATE") ?: "DATE"
-            addView(RadioButton(context).apply { id = 2011; text = "月日"; isChecked = saved == "DATE" })
-            addView(RadioButton(context).apply { id = 2012; text = "随机"; isChecked = saved == "RANDOM" })
-            addView(RadioButton(context).apply { id = 2013; text = "自定义"; isChecked = saved == "CUSTOM" })
-        }
-        serialCustomInput = EditText(this).apply {
-            hint = "自定义数字(1-12位)"
-            setText(prefs.getString("serial_number_custom", "") ?: "")
-        }
-        serialNumberSizeInput = EditText(this).apply {
-            hint = "单号数字字号(24-140)"
-            setText((prefs.getFloat("serial_number_size", 46f)).toInt().toString())
-        }
-        val footerLabel = TextView(this).apply { text = "底部备注/条码" }
-        footerModeGroup = RadioGroup(this).apply {
-            orientation = RadioGroup.VERTICAL
-            val saved = prefs.getString("footer_mode", "NONE") ?: "NONE"
-            addView(RadioButton(context).apply { id = 3001; text = "不显示"; isChecked = saved == "NONE" })
-            addView(RadioButton(context).apply { id = 3002; text = "只显示备注"; isChecked = saved == "NOTE" })
-            addView(RadioButton(context).apply { id = 3003; text = "显示条码 + 备注"; isChecked = saved == "BARCODE" })
-        }
-        noteInput = EditText(this).apply {
-            hint = "备注文本 / 条码内容"
-            setText(prefs.getString("note_text", "") ?: "")
-        }
-        val barcodeWidthLabel = TextView(this).apply { text = "条码粗细强度" }
-        barcodeWidthGroup = RadioGroup(this).apply {
-            orientation = RadioGroup.VERTICAL
-            val saved = prefs.getFloat("barcode_width_scale", 1.0f)
-            addView(RadioButton(context).apply { id = 3101; text = "细(0.8x)"; isChecked = saved == 0.8f })
-            addView(RadioButton(context).apply { id = 3102; text = "标准(1.0x)"; isChecked = saved != 0.8f && saved != 1.2f })
-            addView(RadioButton(context).apply { id = 3103; text = "粗(1.2x)"; isChecked = saved == 1.2f })
-        }
-        val barcodeGapLabel = TextView(this).apply { text = "条码留白密度" }
-        barcodeGapGroup = RadioGroup(this).apply {
-            orientation = RadioGroup.VERTICAL
-            val saved = prefs.getString("barcode_gap_mode", "STANDARD") ?: "STANDARD"
-            addView(RadioButton(context).apply { id = 3111; text = "紧凑"; isChecked = saved == "TIGHT" })
-            addView(RadioButton(context).apply { id = 3112; text = "标准"; isChecked = saved == "STANDARD" })
-            addView(RadioButton(context).apply { id = 3113; text = "疏松"; isChecked = saved == "LOOSE" })
-        }
-        val chartStyleLabel = TextView(this).apply { text = "图表样式" }
-        val chartRuleHint = TextView(this).apply {
-            textSize = 12f
-            text = "图表横轴规则：当天/昨天=按小时；本周/上周/最近7天=按天；最近30天=按天；自定义<=14天按天，15-90天按周，>90天按月。"
-        }
-        chartStyleGroup = RadioGroup(this).apply {
-            orientation = RadioGroup.HORIZONTAL
-            val saved = prefs.getString("chart_style_mode", ChartStyleMode.LINE.name) ?: ChartStyleMode.LINE.name
-            addView(RadioButton(context).apply { id = 7001; text = "折线"; isChecked = saved == ChartStyleMode.LINE.name })
-            addView(RadioButton(context).apply { id = 7002; text = "柱状"; isChecked = saved == ChartStyleMode.BAR.name })
-        }
-        showPeakLabelCheck = CheckBox(this).apply {
-            text = "显示峰值标签"
-            isChecked = prefs.getBoolean("show_peak_label", true)
-        }
-        val yAxisModeLabel = TextView(this).apply { text = "Y轴最大值" }
-        yAxisModeGroup = RadioGroup(this).apply {
-            orientation = RadioGroup.HORIZONTAL
-            val saved = prefs.getString("y_axis_mode", YAxisMode.AUTO.name) ?: YAxisMode.AUTO.name
-            addView(RadioButton(context).apply { id = 7101; text = "自动"; isChecked = saved == YAxisMode.AUTO.name })
-            addView(RadioButton(context).apply { id = 7102; text = "固定"; isChecked = saved == YAxisMode.FIXED.name })
-        }
-        yAxisMaxInput = EditText(this).apply {
-            hint = "固定最大值(分钟)"
-            setText(prefs.getInt("y_axis_fixed_max_minutes", 300).toString())
+        fun openTextEditDialog(title: String, target: EditText, numericOnly: Boolean = false, maxDigits: Int? = null) {
+            val edit = EditText(this).apply {
+                setText(target.text.toString())
+                setSelection(text.length)
+                textSize = 20f
+                if (numericOnly) inputType = InputType.TYPE_CLASS_NUMBER
+            }
+            AlertDialog.Builder(this)
+                .setTitle(title)
+                .setView(edit)
+                .setNegativeButton("取消", null)
+                .setPositiveButton("确定") { _, _ ->
+                    val raw = edit.text.toString()
+                    val next = if (numericOnly) raw.filter { it.isDigit() }.let { v -> maxDigits?.let { v.take(it) } ?: v } else raw
+                    target.setText(next)
+                    target.setSelection(target.text.length)
+                }
+                .show()
         }
 
-        val autoSectionLabel = TextView(this).apply { text = "自动刷新（默认开启）" }
-        autoRefreshCheck = CheckBox(this).apply {
-            text = "启用自动刷新与自动覆盖保存"
-            isChecked = prefs.getBoolean(AutoRefreshConfig.KEY_AUTO_ENABLED, true)
-        }
-        autoModeGroup = RadioGroup(this).apply {
-            orientation = RadioGroup.VERTICAL
-            val saved = prefs.getString(AutoRefreshConfig.KEY_AUTO_MODE, AutoRefreshConfig.MODE_DAILY) ?: AutoRefreshConfig.MODE_DAILY
-            addView(RadioButton(context).apply { id = 8001; text = "每日定时一次（省电，推荐）"; isChecked = saved == AutoRefreshConfig.MODE_DAILY })
-            addView(RadioButton(context).apply { id = 8002; text = "熄屏触发（更实时，较耗电）"; isChecked = saved == AutoRefreshConfig.MODE_SCREEN_OFF })
-        }
-        autoDailyTimeInput = EditText(this).apply {
-            hint = "每日执行时间"
-            setText(prefs.getString(AutoRefreshConfig.KEY_DAILY_TIME, "22:30") ?: "22:30")
-            isFocusable = false
-            isClickable = true
-            setOnClickListener { openDailyTimePicker() }
-        }
-        autoMinIntervalInput = EditText(this).apply {
-            hint = "熄屏触发最小间隔(分钟, 1-240)"
-            setText(prefs.getInt(AutoRefreshConfig.KEY_SCREEN_OFF_MIN_INTERVAL, 3).toString())
-        }
-        autoModeHintText = TextView(this).apply {
-            textSize = 12f
-        }
-        autoContentObserverCheck = CheckBox(this).apply {
-            text = "开启内容变化监听（更实时，明显更耗电）"
-            isChecked = prefs.getBoolean(AutoRefreshConfig.KEY_ENABLE_CONTENT_OBSERVER, false)
-        }
-        autoScreenOnPrewarmCheck = CheckBox(this).apply {
-            text = "开启亮屏预热（锁屏前先生成，较耗电）"
-            isChecked = prefs.getBoolean(AutoRefreshConfig.KEY_ENABLE_SCREEN_ON_PREWARM, false)
-        }
-        val autoWarningText = TextView(this).apply {
-            text = "说明：\n1) 内容变化监听：监听 NeoReader 元数据变化并触发刷新，使用独立短节流（约45秒），不受熄屏最小间隔影响。\n2) 亮屏预热：在点亮/解锁时预先生成，下次锁屏更可能立刻看到新壁纸。\n3) 如追求续航，建议关闭以上两项，仅保留每日定时。"
-            textSize = 12f
+        fun bindInputRow(label: String, valueProvider: () -> String, onClick: (() -> Unit)? = null): Pair<LinearLayout, TextView> {
+            val box = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(32, 40, 32, 40)
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    setMargins(0, 16, 0, 32)
+                }
+                background = inkBorder(4)
+                setOnClickListener { onClick?.invoke() }
+            }
+            box.addView(TextView(this).apply {
+                text = label
+                textSize = 20f
+                setTextColor(Color.BLACK)
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            })
+            val value = TextView(this).apply {
+                text = valueProvider()
+                textSize = 20f
+                setTypeface(Typeface.DEFAULT_BOLD)
+                setTextColor(Color.BLACK)
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                gravity = Gravity.END
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            box.addView(value)
+            root.addView(box)
+            return box to value
         }
 
-        val titleFontLabel = TextView(this).apply { text = "标题字体（系统字体）" }
-        titleFontSpinner = Spinner(this).apply {
-            adapter = buildFontAdapter(systemFonts)
-            val saved = prefs.getString("title_font", "SERIF_BOLD") ?: "SERIF_BOLD"
-            setSelection(findSpinnerIndexBySpec(saved))
+        fun bindEditRow(label: String, target: EditText, numericOnly: Boolean = false, maxDigits: Int? = null): LinearLayout {
+            val (row, value) = bindInputRow(label, { target.text.toString().ifBlank { "点击设置" } }) {
+                openTextEditDialog(label, target, numericOnly, maxDigits)
+            }
+            target.addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    value.text = target.text.toString().ifBlank { "点击设置" }
+                }
+                override fun afterTextChanged(s: Editable?) {}
+            })
+            return row
         }
-        val bodyFontLabel = TextView(this).apply { text = "正文字体（系统字体）" }
-        bodyFontSpinner = Spinner(this).apply {
-            adapter = buildFontAdapter(systemFonts)
-            val saved = prefs.getString("body_font", "MONO") ?: "MONO"
-            setSelection(findSpinnerIndexBySpec(saved))
+
+        fun bindSpinnerRow(label: String, spinner: Spinner): LinearLayout {
+            lateinit var value: TextView
+            val (row, valueView) = bindInputRow(label, {
+                fontLabel(spinner.selectedItem?.toString() ?: "") + " ▼"
+            }) {
+                val labels = systemFonts.map { fontLabel(it) }.toTypedArray()
+                AlertDialog.Builder(this)
+                    .setTitle(label)
+                    .setItems(labels) { _, which ->
+                        spinner.setSelection(which)
+                        value.text = "${labels[which]} ▼"
+                    }
+                    .show()
+            }
+            value = valueView
+            return row
         }
+
+        fun buildFontSpinner(savedKey: String, fallback: String): Spinner {
+            return Spinner(this).apply {
+                adapter = buildFontAdapter(systemFonts)
+                val saved = prefs.getString(savedKey, fallback) ?: fallback
+                setSelection(findSpinnerIndexBySpec(saved))
+                hiddenHost.addView(this)
+            }
+        }
+
+        root.addView(TextView(this).apply {
+            text = "阅读壁纸设置 (墨水屏新版)"
+            textSize = 28f
+            setTextColor(Color.BLACK)
+            setTypeface(Typeface.DEFAULT_BOLD)
+            setPadding(0, 0, 0, 40)
+        })
+
+        val periodOptions = listOf(4000 to "当天\n只看今天", 4006 to "昨天\n只看昨日", 4001 to "本周\n周视图", 4002 to "上周\n回看上周", 4003 to "最近7天\n滚动7天", 4004 to "最近30天\n月度概览", 4005 to "自定义起止\n手动选日期")
+        val periodNames = listOf(PeriodMode.TODAY.name, PeriodMode.YESTERDAY.name, PeriodMode.THIS_WEEK.name, PeriodMode.LAST_WEEK.name, PeriodMode.LAST_7_DAYS.name, PeriodMode.LAST_30_DAYS.name, PeriodMode.CUSTOM.name)
+        val savedPeriod = prefs.getString("period_mode", PeriodMode.THIS_WEEK.name) ?: PeriodMode.THIS_WEEK.name
+        periodGroup = makeRadioGroup(periodOptions, selectedId(savedPeriod, 4001, periodOptions, periodNames))
+
+        val sourceOptions = listOf(1001 to "按阅读时长事件（推荐）\n优先统计真实阅读分钟数", 1002 to "按有路径会话\n有打开记录就算一本", 1003 to "按Metadata最近访问\n按书库最近打开排序")
+        val sourceNames = listOf(DataSourceMode.DURATION.name, DataSourceMode.PATH_SESSION.name, DataSourceMode.METADATA_ACCESS.name)
+        sourceGroup = makeRadioGroup(sourceOptions, selectedId(prefs.getString("source_mode", DataSourceMode.DURATION.name) ?: DataSourceMode.DURATION.name, 1001, sourceOptions, sourceNames))
+
+        val wallpaperOptions = listOf(1201 to "统计壁纸\n生成阅读账单图片", 1202 to "当前阅读封面\n尝试用最近书籍封面", 1203 to "自动封面优先\n有封面用封面，否则用账单")
+        val wallpaperNames = listOf("STATS", "COVER", "AUTO_COVER")
+        wallpaperModeGroup = makeRadioGroup(wallpaperOptions, selectedId(prefs.getString("wallpaper_mode", "STATS") ?: "STATS", 1201, wallpaperOptions, wallpaperNames))
+
+        val coverFitOptions = listOf(1211 to "完整显示\n不裁掉封面", 1212 to "铺满裁切\n铺满屏幕边缘")
+        val coverFitNames = listOf("FIT", "CROP")
+        coverFitModeGroup = makeRadioGroup(coverFitOptions, selectedId(prefs.getString("cover_fit_mode", "FIT") ?: "FIT", 1211, coverFitOptions, coverFitNames), RadioGroup.HORIZONTAL)
+
+        val timeUnitOptions = listOf(2001 to "小时\n自动显示x小时y分钟", 2002 to "分钟\n全部换算成分钟")
+        val timeUnitNames = listOf("HOUR", "MINUTE")
+        timeUnitGroup = makeRadioGroup(timeUnitOptions, selectedId(prefs.getString("time_unit", "HOUR") ?: "HOUR", 2001, timeUnitOptions, timeUnitNames), RadioGroup.HORIZONTAL)
+
+        val readingFilterOptions = listOf(6001 to "全部\n不按状态过滤", 6002 to "仅在读\n只显示没读完", 6003 to "仅已读完\n只显示已完成")
+        val readingFilterNames = listOf(ReadingFilterMode.ALL.name, ReadingFilterMode.READING_ONLY.name, ReadingFilterMode.FINISHED_ONLY.name)
+        readingFilterGroup = makeRadioGroup(readingFilterOptions, selectedId(prefs.getString("reading_filter_mode", ReadingFilterMode.ALL.name) ?: ReadingFilterMode.ALL.name, 6001, readingFilterOptions, readingFilterNames), RadioGroup.HORIZONTAL)
+
+        val progressOptions = listOf(6101 to "页数\n例如32/198", 6102 to "百分比\n例如16%")
+        val progressNames = listOf("PAGES", "PERCENT")
+        progressModeGroup = makeRadioGroup(progressOptions, selectedId(prefs.getString("progress_mode", "PAGES") ?: "PAGES", 6101, progressOptions, progressNames), RadioGroup.HORIZONTAL)
+
+        val serialOptions = listOf(2011 to "月日\n自动用当前日期", 2012 to "随机\n每次生成变化", 2013 to "自定义\n手动固定数字")
+        val serialNames = listOf("DATE", "RANDOM", "CUSTOM")
+        serialModeGroup = makeRadioGroup(serialOptions, selectedId(prefs.getString("serial_number_mode", "DATE") ?: "DATE", 2011, serialOptions, serialNames), RadioGroup.HORIZONTAL)
+
+        val footerOptions = listOf(3001 to "不显示\n底部留白更干净", 3002 to "只显示备注\n显示一句自定义文字", 3003 to "条码 + 备注\n增加票据装饰感")
+        val footerNames = listOf("NONE", "NOTE", "BARCODE")
+        footerModeGroup = makeRadioGroup(footerOptions, selectedId(prefs.getString("footer_mode", "NONE") ?: "NONE", 3001, footerOptions, footerNames))
+
+        val barcodeWidthOptions = listOf(3101 to "细(0.8x)\n更轻", 3102 to "标准(1.0x)\n默认", 3103 to "粗(1.2x)\n更醒目")
+        val savedBarcodeWidth = when (prefs.getFloat("barcode_width_scale", 1.0f)) {
+            0.8f -> 3101
+            1.2f -> 3103
+            else -> 3102
+        }
+        barcodeWidthGroup = makeRadioGroup(barcodeWidthOptions, savedBarcodeWidth, RadioGroup.HORIZONTAL)
+
+        val barcodeGapOptions = listOf(3111 to "紧凑\n线条更密", 3112 to "标准\n推荐", 3113 to "疏松\n留白更多")
+        val barcodeGapNames = listOf("TIGHT", "STANDARD", "LOOSE")
+        barcodeGapGroup = makeRadioGroup(barcodeGapOptions, selectedId(prefs.getString("barcode_gap_mode", "STANDARD") ?: "STANDARD", 3112, barcodeGapOptions, barcodeGapNames))
+
+        val chartStyleOptions = listOf(7001 to "折线\n看趋势", 7002 to "柱状\n看每天差异")
+        val chartStyleNames = listOf(ChartStyleMode.LINE.name, ChartStyleMode.BAR.name)
+        chartStyleGroup = makeRadioGroup(chartStyleOptions, selectedId(prefs.getString("chart_style_mode", ChartStyleMode.LINE.name) ?: ChartStyleMode.LINE.name, 7001, chartStyleOptions, chartStyleNames), RadioGroup.HORIZONTAL)
+
+        val yAxisOptions = listOf(7101 to "自动\n按数据自己缩放", 7102 to "固定\n不同周期更好对比")
+        val yAxisNames = listOf(YAxisMode.AUTO.name, YAxisMode.FIXED.name)
+        yAxisModeGroup = makeRadioGroup(yAxisOptions, selectedId(prefs.getString("y_axis_mode", YAxisMode.AUTO.name) ?: YAxisMode.AUTO.name, 7101, yAxisOptions, yAxisNames), RadioGroup.HORIZONTAL)
+
+        val autoOptions = listOf(8001 to "每日定时一次（推荐）\n省电，适合稳定更新", 8002 to "熄屏触发\n更及时，但更耗电")
+        val autoNames = listOf(AutoRefreshConfig.MODE_DAILY, AutoRefreshConfig.MODE_SCREEN_OFF)
+        autoModeGroup = makeRadioGroup(autoOptions, selectedId(prefs.getString(AutoRefreshConfig.KEY_AUTO_MODE, AutoRefreshConfig.MODE_DAILY) ?: AutoRefreshConfig.MODE_DAILY, 8001, autoOptions, autoNames))
+
+        includeUnreadCheck = makeCheck(prefs.getBoolean("include_unread", false))
+        showProgressStatusCheck = makeCheck(prefs.getBoolean("show_progress_status", true))
+        showAuthorCheck = makeCheck(prefs.getBoolean("show_author", true))
+        showChartCheck = makeCheck(prefs.getBoolean("show_chart", true))
+        showPeakLabelCheck = makeCheck(prefs.getBoolean("show_peak_label", true))
+        autoRefreshCheck = makeCheck(prefs.getBoolean(AutoRefreshConfig.KEY_AUTO_ENABLED, true))
+
+        minDurationInput = makeInput(prefs.getInt("min_duration_minutes", 1).toString())
+        topNInput = makeInput(prefs.getInt("top_n", 5).coerceIn(1, 5).toString())
+        titleInput = makeInput(prefs.getString("receipt_title", "阅读账单") ?: "阅读账单")
+        titleSizeInput = makeInput((prefs.getFloat("receipt_title_size", 74f)).toInt().toString())
+        bodySizeInput = makeInput((prefs.getFloat("receipt_body_size", 34f)).toInt().toString())
+        serialCustomInput = makeInput(prefs.getString("serial_number_custom", "") ?: "")
+        serialNumberSizeInput = makeInput((prefs.getFloat("serial_number_size", 46f)).toInt().toString())
+        noteInput = makeInput(prefs.getString("note_text", "") ?: "")
+        yAxisMaxInput = makeInput(prefs.getInt("y_axis_fixed_max_minutes", 300).toString())
+        autoDailyTimeInput = makeInput(prefs.getString(AutoRefreshConfig.KEY_DAILY_TIME, "22:30") ?: "22:30")
+        autoMinIntervalInput = makeInput(prefs.getInt(AutoRefreshConfig.KEY_SCREEN_OFF_MIN_INTERVAL, 3).toString())
+        titleFontSpinner = buildFontSpinner("title_font", "SERIF_BOLD")
+        bodyFontSpinner = buildFontSpinner("body_font", "MONO")
+
+        root.addView(hiddenHost)
+
+        addSectionTitle("数据与统计", "周期、数据口径、时长单位与日期范围")
+        val periodSegment = bindSegmented("统计周期", periodGroup, periodOptions, isVertical = false)
+        addHint("说明：选择账单统计哪一段时间；自定义模式会显示起止日期选择。")
+        val sourceSegment = bindSegmented("数据口径", sourceGroup, sourceOptions, isVertical = true)
+        val wallpaperModeSegment = bindSegmented("壁纸类型", wallpaperModeGroup, wallpaperOptions, isVertical = true)
+        val wallpaperModeHint = addHint("说明：统计壁纸最稳定；封面模式只读取本地书籍封面，不访问网络。提示：封面模式依赖 NeoReader 元数据落库。通常需要先退出当前正在阅读的书籍再锁屏，才会刷新到最新封面；如果在书籍打开状态下直接锁屏，往往仍显示旧封面，通常下一次锁屏才会生效。")
+        val coverFitSegment = bindSegmented("封面显示方式", coverFitModeGroup, coverFitOptions, isVertical = false)
+        val timeUnitSegment = bindSegmented("时长显示单位", timeUnitGroup, timeUnitOptions, isVertical = false)
+        addHint("说明：小时模式更适合壁纸阅读，分钟模式更适合精确核对。")
+        val weekStartRow = bindInputRow("选择起始日期", { selectedWeekStartYmd.ifBlank { currentWeekStartYmd() } }) { openWeekStartDatePicker() }.first
+        weekStartText = weekStartRow.getChildAt(1) as TextView
+        val weekEndRow = bindInputRow("选择结束日期", { selectedWeekEndYmd.ifBlank { currentWeekEndYmd() } }) { openWeekEndDatePicker() }.first
+        weekEndText = weekEndRow.getChildAt(1) as TextView
+
+        addSectionTitle("书单筛选", "控制展示书目与统计阈值")
+        val includeUnreadRow = bindToggle("最近阅读包含未读（readingStatus=0）", includeUnreadCheck)
+        addHint("说明：关闭后会尽量排除只进过书库但没真正开始读的书。")
+        val readingFilterSegment = bindSegmented("书单筛选（状态）", readingFilterGroup, readingFilterOptions, isVertical = false)
+        val topNSlider = bindSlider("Top N（最多显示书籍数量）", topNInput, 1, 5)
+        addHint("说明：默认最多5本；如果底部还要显示图表和条码，3本会更宽松。")
+        val minDurationSlider = bindSlider("最小时长阈值（分钟，作用于“按阅读时长事件”）", minDurationInput, 0, 240)
+        addHint("说明：小于这个时长的阅读事件会被忽略，可过滤误打开。")
+
+        addSectionTitle("排版与字体", "标题、字号、进度与字体")
+        val titleRow = bindEditRow("账单标题", titleInput)
+        addHint("说明：会显示在壁纸右上角，例如“阅读账单”或“留台单”。")
+        val titleSizeSlider = bindSlider("标题字号", titleSizeInput, 24, 120)
+        val bodySizeSlider = bindSlider("正文字号基准", bodySizeInput, 18, 60)
+        addHint("说明：字号会影响整张壁纸能放下多少内容；书多时建议调小。")
+        val serialSegment = bindSegmented("单号数字模式", serialModeGroup, serialOptions, isVertical = false)
+        val serialCustomRow = bindEditRow("自定义数字", serialCustomInput, numericOnly = true, maxDigits = 12)
+        val serialSizeSlider = bindSlider("单号数字字号", serialNumberSizeInput, 24, 140)
+        addHint("说明：数字变大时会向上扩展，避免挤压下面的操作编号。")
+        val progressStatusRow = bindToggle("显示进度和状态行", showProgressStatusCheck)
+        addHint("说明：关闭后书单更简洁，但看不到读到哪里。")
+        val progressSegment = bindSegmented("进度显示方式", progressModeGroup, progressOptions, isVertical = false)
+        val authorRow = bindToggle("显示作者行（在进度行上方）", showAuthorCheck)
+        addHint("说明：如果文石元数据里没有作者，会显示未知；关闭后可节省空间。")
+        val titleFontRow = bindSpinnerRow("标题字体（系统字体）", titleFontSpinner)
+        val bodyFontRow = bindSpinnerRow("正文字体（系统字体）", bodyFontSpinner)
         pickFontDirBtn = Button(this).apply {
-            text = "选择字体目录（SAF）"
+            visibility = View.GONE
             setOnClickListener { pickFontTreeLauncher.launch(null) }
+            hiddenHost.addView(this)
         }
-        styleEinkButton(pickFontDirBtn)
+        val fontDirRow = bindInputRow("选择字体目录（SAF）", { selectedFontDirUri?.let { "已选择 ▼" } ?: "未选择 ▼" }) {
+            pickFontTreeLauncher.launch(null)
+        }.first
+        addHint("说明：选择存储/Fonts 后，可在标题字体和正文字体里使用里面的 ttf/otf 字体。")
         fontScanText = TextView(this).apply {
-            textSize = 12f
             text = fontScanReport
+            textSize = 13f
+            setTextColor(Color.DKGRAY)
+            setPadding(0, 0, 0, 16)
         }
+        root.addView(fontScanText)
 
-        val weekLabel = TextView(this).apply { text = "自定义起止日期" }
-        weekStartText = TextView(this).apply {
-            text = selectedWeekStartYmd
-            textSize = 18f
-            setTypeface(typeface, Typeface.BOLD)
+        addSectionTitle("图表", "图形样式与坐标设置")
+        val chartToggleRow = bindToggle("显示下方周曲线图", showChartCheck)
+        addHint("说明：打开后能看到时间分布；如果书单或备注太多，可关闭节省空间。")
+        val chartStyleSegment = bindSegmented("图表样式", chartStyleGroup, chartStyleOptions, isVertical = false)
+        val chartRuleHint = addHint("图表横轴规则：当天/昨天=按小时；本周/上周/最近7天=按天；最近30天=按天；自定义<=14天按天，15-90天按周，>90天按月。")
+        val peakLabelRow = bindToggle("显示峰值标签", showPeakLabelCheck)
+        val yAxisSegment = bindSegmented("Y轴最大值", yAxisModeGroup, yAxisOptions, isVertical = false)
+        val yAxisFixedSlider = bindSlider("Y轴固定最大值(分钟)", yAxisMaxInput, 1, 2000)
+        addHint("说明：固定值越大，柱子/曲线越矮；用于不同周期之间保持同一比例。")
+
+        addSectionTitle("底部备注与条码", "备注文本与装饰条码参数")
+        val footerSegment = bindSegmented("底部备注/条码", footerModeGroup, footerOptions, isVertical = true)
+        val noteRow = bindEditRow("备注文本 / 条码内容", noteInput)
+        addHint("说明：备注会显示在底部；条码只是装饰风格，不保证所有扫码软件都能识别。")
+        val barcodeWidthSegment = bindSegmented("条码粗细强度", barcodeWidthGroup, barcodeWidthOptions, isVertical = false)
+        val barcodeGapSegment = bindSegmented("条码留白密度", barcodeGapGroup, barcodeGapOptions, isVertical = false)
+
+        addSectionTitle("自动刷新", "默认自动模式，可切换定时或熄屏触发")
+        val autoToggleRow = bindToggle("启用自动刷新与自动覆盖保存", autoRefreshCheck)
+        addHint("说明：开启后 App 会按自动模式覆盖保存同一张壁纸图片。")
+        val autoModeSegment = bindSegmented("自动刷新模式", autoModeGroup, autoOptions, isVertical = true)
+        val autoDailyRow = bindInputRow("每日执行时间", { normalizeDailyTime(autoDailyTimeInput.text.toString()) }) { openDailyTimePicker() }.first
+        val autoDailyValue = autoDailyRow.getChildAt(1) as TextView
+        autoDailyTimeInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { autoDailyValue.text = normalizeDailyTime(autoDailyTimeInput.text.toString()) }
+            override fun afterTextChanged(s: Editable?) {}
+        })
+        val autoMinIntervalSlider = bindSlider("熄屏触发最小间隔(分钟)", autoMinIntervalInput, 1, 240)
+        addHint("说明：间隔越短越及时，也越容易增加耗电；3分钟是折中值。")
+        autoModeHintText = TextView(this).apply {
+            textSize = 13f
+            setTextColor(Color.DKGRAY)
+            setPadding(0, 0, 0, 16)
+            root.addView(this)
         }
-        weekEndText = TextView(this).apply {
-            text = selectedWeekEndYmd
-            textSize = 18f
-            setTypeface(typeface, Typeface.BOLD)
+        autoStateText = TextView(this).apply {
+            textSize = 13f
+            setTextColor(Color.DKGRAY)
+            setPadding(0, 0, 0, 16)
+            root.addView(this)
         }
-        val weekPickerBtn = Button(this).apply {
-            text = "选择起始日期"
-            setOnClickListener { openWeekStartDatePicker() }
-        }
-        styleEinkButton(weekPickerBtn)
-        val weekEndPickerBtn = Button(this).apply {
-            text = "选择结束日期"
-            setOnClickListener { openWeekEndDatePicker() }
-        }
-        styleEinkButton(weekEndPickerBtn)
+        val autoWarningText = addHint("提示：熄屏触发会增加唤醒次数与耗电；NeoReader 常在退出当前书籍/会话落库后才更新元数据，所以可能出现“本次锁屏仍是旧封面、下次锁屏生效”的现象。")
 
         statusText = TextView(this).apply {
             text = "设置后点击按钮生成。"
-            textSize = 15f
+            textSize = 16f
+            setTextColor(Color.BLACK)
+            setPadding(0, 16, 0, 0)
+            root.addView(this)
         }
-
-        container.addView(title)
-        val foldRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val btnExpandAll = Button(this).apply {
-            text = "全部展开"
-            setOnClickListener {
-                sectionContents.forEach { it.visibility = View.VISIBLE }
-            }
-        }
-        styleEinkButton(btnExpandAll)
-        val btnCollapseAll = Button(this).apply {
-            text = "全部收起"
-            setOnClickListener {
-                sectionContents.forEach { it.visibility = View.GONE }
-            }
-        }
-        styleEinkButton(btnCollapseAll)
-        foldRow.addView(btnExpandAll)
-        foldRow.addView(btnCollapseAll)
-        container.addView(foldRow)
-
-        val (secDataBox, secData) = section("数据与统计", "周期、数据口径、时长单位与日期范围", true, onReset = {
-            periodGroup.check(4001)
-            sourceGroup.check(1001)
-            wallpaperModeGroup.check(1201)
-            coverFitModeGroup.check(1211)
-            timeUnitGroup.check(2001)
-            selectedWeekStartYmd = currentWeekStartYmd()
-            selectedWeekEndYmd = currentWeekEndYmd()
-            weekStartText.text = selectedWeekStartYmd
-            weekEndText.text = selectedWeekEndYmd
-            applySettingsPreview()
-        })
-        secData.addView(periodLabel); secData.addView(periodGroup); secData.addView(sourceLabel); secData.addView(sourceGroup)
-        secData.addView(wallpaperModeLabel); secData.addView(wallpaperModeGroup); secData.addView(coverFitModeLabel); secData.addView(coverFitModeGroup)
-        secData.addView(timeUnitLabel); secData.addView(timeUnitGroup); secData.addView(weekLabel); secData.addView(weekStartText)
-        secData.addView(weekEndText); secData.addView(weekPickerBtn); secData.addView(weekEndPickerBtn); container.addView(secDataBox)
-
-        val (secFilterBox, secFilter) = section("书单筛选", "控制展示书目与统计阈值", true, onReset = {
-            includeUnreadCheck.isChecked = false
-            readingFilterGroup.check(6001)
-            topNInput.setText("5")
-            minDurationInput.setText("1")
-            applySettingsPreview()
-        })
-        secFilter.addView(includeUnreadCheck); secFilter.addView(readingFilterLabel); secFilter.addView(readingFilterGroup)
-        secFilter.addView(topNLabel); secFilter.addView(numberControl("Top N", topNInput, 1, 5))
-        secFilter.addView(minDurationLabel); secFilter.addView(numberControl("最小时长(分钟)", minDurationInput, 0, 240)); container.addView(secFilterBox)
-
-        val (secLayoutBox, secLayout) = section("排版与字体", "标题、字号、进度与字体", true, onReset = {
-            titleInput.setText("阅读账单")
-            titleSizeInput.setText("74")
-            bodySizeInput.setText("34")
-            serialModeGroup.check(2011)
-            serialCustomInput.setText("")
-            serialNumberSizeInput.setText("46")
-            showProgressStatusCheck.isChecked = true
-            progressModeGroup.check(6101)
-            showAuthorCheck.isChecked = true
-            applySettingsPreview()
-        })
-        secLayout.addView(titleInput); secLayout.addView(numberControl("标题字号", titleSizeInput, 24, 120)); secLayout.addView(numberControl("正文字号", bodySizeInput, 18, 60))
-        secLayout.addView(serialModeLabel); secLayout.addView(serialModeGroup); secLayout.addView(serialCustomInput); secLayout.addView(numberControl("单号数字字号", serialNumberSizeInput, 24, 140))
-        secLayout.addView(showProgressStatusCheck); secLayout.addView(progressModeLabel); secLayout.addView(progressModeGroup); secLayout.addView(showAuthorCheck)
-        secLayout.addView(titleFontLabel); secLayout.addView(titleFontSpinner); secLayout.addView(bodyFontLabel); secLayout.addView(bodyFontSpinner)
-        secLayout.addView(pickFontDirBtn); secLayout.addView(fontScanText); container.addView(secLayoutBox)
-
-        val (secChartBox, secChart) = section("图表", "图形样式与坐标设置", false, onReset = {
-            showChartCheck.isChecked = true
-            chartStyleGroup.check(7001)
-            showPeakLabelCheck.isChecked = true
-            yAxisModeGroup.check(7101)
-            yAxisMaxInput.setText("300")
-            applySettingsPreview()
-        })
-        val yAxisFixedControl = numberControl("Y轴固定最大值(分钟)", yAxisMaxInput, 1, 2000)
-        secChart.addView(showChartCheck); secChart.addView(chartStyleLabel); secChart.addView(chartRuleHint); secChart.addView(chartStyleGroup)
-        secChart.addView(showPeakLabelCheck); secChart.addView(yAxisModeLabel); secChart.addView(yAxisModeGroup); secChart.addView(yAxisFixedControl); container.addView(secChartBox)
-
-        val (secFooterBox, secFooter) = section("底部备注与条码", "备注文本与装饰条码参数", false, onReset = {
-            footerModeGroup.check(3001)
-            noteInput.setText("")
-            barcodeWidthGroup.check(3102)
-            barcodeGapGroup.check(3112)
-            applySettingsPreview()
-        })
-        secFooter.addView(footerLabel); secFooter.addView(footerModeGroup); secFooter.addView(noteInput)
-        secFooter.addView(barcodeWidthLabel); secFooter.addView(barcodeWidthGroup); secFooter.addView(barcodeGapLabel); secFooter.addView(barcodeGapGroup); container.addView(secFooterBox)
-
-        val (secAutoBox, secAuto) = section("自动刷新", "默认自动模式，可切换定时或熄屏触发", false, onReset = {
-            autoRefreshCheck.isChecked = true
-            autoModeGroup.check(8001)
-            autoDailyTimeInput.setText("22:30")
-            autoMinIntervalInput.setText("3")
-            autoContentObserverCheck.isChecked = false
-            autoScreenOnPrewarmCheck.isChecked = false
-            applySettingsPreview()
-        })
-        val autoMinIntervalControl = numberControl("熄屏最小间隔(分钟)", autoMinIntervalInput, 1, 240)
-        secAuto.addView(autoSectionLabel); secAuto.addView(autoRefreshCheck); secAuto.addView(autoModeGroup); secAuto.addView(autoDailyTimeInput)
-        secAuto.addView(autoMinIntervalControl); secAuto.addView(autoContentObserverCheck); secAuto.addView(autoScreenOnPrewarmCheck)
-        secAuto.addView(autoModeHintText); secAuto.addView(autoWarningText); container.addView(secAutoBox)
 
         fun updateConditionalVisibility() {
-            val showChart = showChartCheck.isChecked
-            chartStyleLabel.visibility = if (showChart) View.VISIBLE else View.GONE
-            chartRuleHint.visibility = if (showChart) View.VISIBLE else View.GONE
-            chartStyleGroup.visibility = if (showChart) View.VISIBLE else View.GONE
-            showPeakLabelCheck.visibility = if (showChart) View.VISIBLE else View.GONE
-            yAxisModeLabel.visibility = if (showChart) View.VISIBLE else View.GONE
-            yAxisModeGroup.visibility = if (showChart) View.VISIBLE else View.GONE
-            yAxisFixedControl.visibility = if (showChart && yAxisModeGroup.checkedRadioButtonId == 7102) View.VISIBLE else View.GONE
-
             val customPeriod = periodGroup.checkedRadioButtonId == 4005
-            weekLabel.visibility = if (customPeriod) View.VISIBLE else View.GONE
-            weekStartText.visibility = if (customPeriod) View.VISIBLE else View.GONE
-            weekEndText.visibility = if (customPeriod) View.VISIBLE else View.GONE
-            weekPickerBtn.visibility = if (customPeriod) View.VISIBLE else View.GONE
-            weekEndPickerBtn.visibility = if (customPeriod) View.VISIBLE else View.GONE
+            weekStartRow.visibility = if (customPeriod) View.VISIBLE else View.GONE
+            weekEndRow.visibility = if (customPeriod) View.VISIBLE else View.GONE
 
-            val footerVisible = footerModeGroup.checkedRadioButtonId != 3001
-            noteInput.visibility = if (footerVisible) View.VISIBLE else View.GONE
-            barcodeWidthLabel.visibility = if (footerModeGroup.checkedRadioButtonId == 3003) View.VISIBLE else View.GONE
-            barcodeWidthGroup.visibility = if (footerModeGroup.checkedRadioButtonId == 3003) View.VISIBLE else View.GONE
-            barcodeGapLabel.visibility = if (footerModeGroup.checkedRadioButtonId == 3003) View.VISIBLE else View.GONE
-            barcodeGapGroup.visibility = if (footerModeGroup.checkedRadioButtonId == 3003) View.VISIBLE else View.GONE
+            val coverOptsVisible = wallpaperModeGroup.checkedRadioButtonId != 1201
+            coverFitSegment.visibility = if (coverOptsVisible) View.VISIBLE else View.GONE
+
+            serialCustomRow.visibility = if (serialModeGroup.checkedRadioButtonId == 2013) View.VISIBLE else View.GONE
+
+            val showChart = showChartCheck.isChecked
+            chartStyleSegment.visibility = if (showChart) View.VISIBLE else View.GONE
+            chartRuleHint.visibility = if (showChart) View.VISIBLE else View.GONE
+            peakLabelRow.visibility = if (showChart) View.VISIBLE else View.GONE
+            yAxisSegment.visibility = if (showChart) View.VISIBLE else View.GONE
+            yAxisFixedSlider.visibility = if (showChart && yAxisModeGroup.checkedRadioButtonId == 7102) View.VISIBLE else View.GONE
+
+            val footerMode = footerModeGroup.checkedRadioButtonId
+            noteRow.visibility = if (footerMode != 3001) View.VISIBLE else View.GONE
+            barcodeWidthSegment.visibility = if (footerMode == 3003) View.VISIBLE else View.GONE
+            barcodeGapSegment.visibility = if (footerMode == 3003) View.VISIBLE else View.GONE
 
             val autoEnabled = autoRefreshCheck.isChecked
-            autoModeGroup.visibility = if (autoEnabled) View.VISIBLE else View.GONE
-            autoDailyTimeInput.visibility = if (autoEnabled && autoModeGroup.checkedRadioButtonId == 8001) View.VISIBLE else View.GONE
-            autoMinIntervalControl.visibility = if (autoEnabled && autoModeGroup.checkedRadioButtonId == 8002) View.VISIBLE else View.GONE
-            autoContentObserverCheck.visibility = if (autoEnabled && autoModeGroup.checkedRadioButtonId == 8002) View.VISIBLE else View.GONE
-            autoScreenOnPrewarmCheck.visibility = if (autoEnabled && autoModeGroup.checkedRadioButtonId == 8002) View.VISIBLE else View.GONE
+            autoModeSegment.visibility = if (autoEnabled) View.VISIBLE else View.GONE
+            autoDailyRow.visibility = if (autoEnabled && autoModeGroup.checkedRadioButtonId == 8001) View.VISIBLE else View.GONE
+            autoMinIntervalSlider.visibility = if (autoEnabled && autoModeGroup.checkedRadioButtonId == 8002) View.VISIBLE else View.GONE
             autoModeHintText.visibility = if (autoEnabled) View.VISIBLE else View.GONE
+            autoStateText.visibility = if (autoEnabled) View.VISIBLE else View.GONE
             autoWarningText.visibility = if (autoEnabled) View.VISIBLE else View.GONE
-
-            serialCustomInput.visibility = if (serialModeGroup.checkedRadioButtonId == 2013) View.VISIBLE else View.GONE
-            val coverOptsVisible = wallpaperModeGroup.checkedRadioButtonId != 1201
-            coverFitModeGroup.visibility = if (coverOptsVisible) View.VISIBLE else View.GONE
         }
+
         showChartCheck.setOnCheckedChangeListener { _, _ -> updateConditionalVisibility(); if (!isInitializingUi) applySettingsPreview() }
         periodGroup.setOnCheckedChangeListener { _, _ -> updateConditionalVisibility(); if (!isInitializingUi) applySettingsPreview() }
         yAxisModeGroup.setOnCheckedChangeListener { _, _ -> updateConditionalVisibility(); if (!isInitializingUi) applySettingsPreview() }
         footerModeGroup.setOnCheckedChangeListener { _, _ -> updateConditionalVisibility(); if (!isInitializingUi) applySettingsPreview() }
         autoRefreshCheck.setOnCheckedChangeListener { _, _ -> updateConditionalVisibility(); if (!isInitializingUi) applySettingsPreview() }
         autoModeGroup.setOnCheckedChangeListener { _, _ -> updateConditionalVisibility(); if (!isInitializingUi) applySettingsPreview() }
-        autoContentObserverCheck.setOnCheckedChangeListener { _, _ -> if (!isInitializingUi) applySettingsPreview() }
-        autoScreenOnPrewarmCheck.setOnCheckedChangeListener { _, _ -> if (!isInitializingUi) applySettingsPreview() }
         serialModeGroup.setOnCheckedChangeListener { _, _ -> updateConditionalVisibility(); if (!isInitializingUi) applySettingsPreview() }
         wallpaperModeGroup.setOnCheckedChangeListener { _, _ -> updateConditionalVisibility(); if (!isInitializingUi) applySettingsPreview() }
         updateConditionalVisibility()
 
-        container.addView(statusText)
-
         updateAutoRefreshHint()
+        updateAutoRuntimeState()
         attachAutoRefreshListeners()
 
-        scroll.addView(container)
+        scroll.addView(root)
         return scroll
     }
 
@@ -1096,26 +1245,57 @@ class MainActivity : AppCompatActivity() {
             .putString(AutoRefreshConfig.KEY_AUTO_MODE, mode)
             .putString(AutoRefreshConfig.KEY_DAILY_TIME, dailyTime)
             .putInt(AutoRefreshConfig.KEY_SCREEN_OFF_MIN_INTERVAL, minInterval)
-            .putBoolean(AutoRefreshConfig.KEY_ENABLE_CONTENT_OBSERVER, autoContentObserverCheck.isChecked)
-            .putBoolean(AutoRefreshConfig.KEY_ENABLE_SCREEN_ON_PREWARM, autoScreenOnPrewarmCheck.isChecked)
             .apply()
         if (autoDailyTimeInput.text.toString() != dailyTime) {
             autoDailyTimeInput.setText(dailyTime)
             autoDailyTimeInput.setSelection(dailyTime.length)
         }
         updateAutoRefreshHint()
+        updateAutoRuntimeState()
         AutoRefreshScheduler.reschedule(this)
         AutoRefreshRuntime.sync(this)
-        AutoRefreshLog.i(this, "auto settings updated: enabled=$isEnabled mode=$mode dailyTime=$dailyTime minInterval=$minInterval observer=${autoContentObserverCheck.isChecked} prewarm=${autoScreenOnPrewarmCheck.isChecked}")
+        AutoRefreshLog.i(this, "auto settings updated: enabled=$isEnabled mode=$mode dailyTime=$dailyTime minInterval=$minInterval")
     }
 
     private fun updateAutoRefreshHint() {
         val mode = if (::autoModeGroup.isInitialized && autoModeGroup.checkedRadioButtonId == 8002) "熄屏触发" else "每日定时"
         autoModeHintText.text = if (::autoRefreshCheck.isInitialized && autoRefreshCheck.isChecked) {
-            "当前自动模式：$mode，熄屏最小间隔=${autoMinIntervalInput.text}，监听=${if (autoContentObserverCheck.isChecked) "开" else "关"}，预热=${if (autoScreenOnPrewarmCheck.isChecked) "开" else "关"}"
+            "当前自动模式：$mode，熄屏最小间隔=${autoMinIntervalInput.text}"
         } else {
             "当前自动模式：已关闭"
         }
+    }
+
+    private fun updateAutoRuntimeState() {
+        if (!::autoStateText.isInitialized) return
+        val p = getSharedPreferences(AutoRefreshConfig.PREFS_NAME, Context.MODE_PRIVATE)
+        val enabled = p.getBoolean(AutoRefreshConfig.KEY_AUTO_ENABLED, true)
+        val mode = p.getString(AutoRefreshConfig.KEY_AUTO_MODE, AutoRefreshConfig.MODE_DAILY) ?: AutoRefreshConfig.MODE_DAILY
+        val dailyTime = p.getString(AutoRefreshConfig.KEY_DAILY_TIME, "22:30") ?: "22:30"
+        val minInterval = p.getInt(AutoRefreshConfig.KEY_SCREEN_OFF_MIN_INTERVAL, 3).coerceIn(1, 240)
+        val lastMs = p.getLong(AutoRefreshConfig.KEY_LAST_TRIGGER_MS, 0L)
+        val lastReasonRaw = p.getString(AutoRefreshConfig.KEY_LAST_REASON, "") ?: ""
+        val lastReason = when (lastReasonRaw) {
+            "screen_off" -> "熄屏触发"
+            "screen_on_prewarm" -> "亮屏预热"
+            "book_content_changed" -> "内容变化"
+            "daily_alarm" -> "每日定时"
+            "" -> "暂无"
+            else -> lastReasonRaw
+        }
+        val lastTime = if (lastMs > 0L) {
+            SimpleDateFormat("MM-dd HH:mm:ss", Locale.US).format(Date(lastMs))
+        } else {
+            "暂无"
+        }
+        val runtimeHint = if (!enabled) {
+            "自动已关闭"
+        } else if (mode == AutoRefreshConfig.MODE_SCREEN_OFF) {
+            "熄屏监听应运行（前台服务）"
+        } else {
+            "按每日定时运行（$dailyTime）"
+        }
+        autoStateText.text = "自动状态：$runtimeHint\n最近触发：$lastTime（$lastReason）\n当前参数：模式=$mode，定时=$dailyTime，熄屏间隔=${minInterval}分钟"
     }
 
     private fun normalizeDailyTime(raw: String): String {
@@ -1142,15 +1322,316 @@ class MainActivity : AppCompatActivity() {
         return container
     }
 
+    private fun buildEinkUiPage(): View {
+        val scroll = ScrollView(this).apply { setBackgroundColor(Color.WHITE) }
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(32, 40, 32, 80)
+        }
+
+        root.addView(TextView(this).apply {
+            text = "阅读壁纸设置 (墨水屏新版)"
+            textSize = 28f
+            setTextColor(Color.BLACK)
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setPadding(0, 0, 0, 40)
+        })
+
+        fun createDivider(thickness: Int = 4, topMargin: Int = 0, bottomMargin: Int = 24) = View(this@MainActivity).apply {
+            setBackgroundColor(Color.BLACK)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, thickness).apply {
+                setMargins(0, topMargin, 0, bottomMargin)
+            }
+        }
+
+        fun addSectionTitle(text: String, hint: String? = null) {
+            root.addView(TextView(this@MainActivity).apply {
+                this.text = text
+                textSize = 24f
+                setTextColor(Color.BLACK)
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                setPadding(0, 48, 0, if (hint == null) 16 else 6)
+            })
+            if (hint != null) {
+                root.addView(TextView(this@MainActivity).apply {
+                    this.text = hint
+                    textSize = 14f
+                    setTextColor(Color.DKGRAY)
+                    setPadding(0, 0, 0, 24)
+                })
+            }
+            root.addView(createDivider(4, 0, 32))
+        }
+
+        fun addHint(hint: String) {
+            root.addView(TextView(this@MainActivity).apply {
+                text = hint
+                textSize = 13f
+                setTextColor(Color.DKGRAY)
+                setPadding(0, 0, 0, 16)
+            })
+        }
+
+        fun addToggle(label: String, checked: Boolean = false) {
+            val row = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                setPadding(0, 16, 0, 32)
+            }
+            row.addView(TextView(this@MainActivity).apply {
+                text = label
+                textSize = 20f
+                setTextColor(Color.BLACK)
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            })
+            val einkToggle = LinearLayout(this@MainActivity).apply {
+                layoutParams = LinearLayout.LayoutParams(64, 64)
+                setPadding(12, 12, 12, 12)
+                background = android.graphics.drawable.GradientDrawable().apply { setStroke(4, Color.BLACK) }
+            }
+            val einkToggleInner = View(this@MainActivity).apply {
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+                setBackgroundColor(if (checked) Color.BLACK else Color.TRANSPARENT)
+            }
+            einkToggle.addView(einkToggleInner)
+            var state = checked
+            row.setOnClickListener {
+                state = !state
+                einkToggleInner.setBackgroundColor(if (state) Color.BLACK else Color.TRANSPARENT)
+            }
+            row.addView(einkToggle)
+            root.addView(row)
+        }
+
+        fun addSegmented(label: String, options: List<String>, selected: Int = 0, isVertical: Boolean = false) {
+            root.addView(TextView(this@MainActivity).apply {
+                text = label
+                textSize = 20f
+                setTextColor(Color.BLACK)
+                setPadding(0, 16, 0, 16)
+            })
+            if (isVertical) {
+                val sg = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { setMargins(0,0,0,32) }
+                    background = android.graphics.drawable.GradientDrawable().apply { setStroke(4, Color.BLACK) }
+                }
+                val views = mutableListOf<TextView>()
+                options.forEachIndexed { index, opt ->
+                    val tv = TextView(this@MainActivity).apply {
+                        text = opt
+                        textSize = 18f
+                        setTypeface(typeface, android.graphics.Typeface.BOLD)
+                        setPadding(32, 24, 32, 24)
+                    }
+                    views.add(tv)
+                    sg.addView(tv)
+                    if (index < options.size - 1) {
+                        sg.addView(View(this@MainActivity).apply {
+                            setBackgroundColor(Color.BLACK)
+                            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 4)
+                        })
+                    }
+                }
+                views.forEach { it.setBackgroundColor(Color.TRANSPARENT); it.setTextColor(Color.BLACK) }
+                views[selected].setBackgroundColor(Color.BLACK)
+                views[selected].setTextColor(Color.WHITE)
+                root.addView(sg)
+            } else {
+                 // Break into rows if many options, roughly 3 per row for horizontal
+                 val rows = options.chunked(3)
+                 val outerGroup = LinearLayout(this@MainActivity).apply {
+                     orientation = LinearLayout.VERTICAL
+                     layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { setMargins(0,0,0,32) }
+                     background = android.graphics.drawable.GradientDrawable().apply { setStroke(4, Color.BLACK) }
+                 }
+                 var globalIndex = 0
+                 val allViews = mutableListOf<TextView>()
+                 rows.forEachIndexed { rIndex, rowOps ->
+                     val hGroup = LinearLayout(this@MainActivity).apply {
+                         orientation = LinearLayout.HORIZONTAL
+                         layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                     }
+                     rowOps.forEachIndexed { cIndex, opt ->
+                         val tv = TextView(this@MainActivity).apply {
+                             text = opt
+                             textSize = 16f
+                             setTypeface(typeface, android.graphics.Typeface.BOLD)
+                             gravity = android.view.Gravity.CENTER
+                             setPadding(16, 24, 16, 24)
+                             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                         }
+                         allViews.add(tv)
+                         hGroup.addView(tv)
+                         if (cIndex < rowOps.size - 1) {
+                             hGroup.addView(View(this@MainActivity).apply { setBackgroundColor(Color.BLACK); layoutParams = LinearLayout.LayoutParams(4, ViewGroup.LayoutParams.MATCH_PARENT) })
+                         }
+                     }
+                     // Pad with empty views if row not full to keep alignment
+                     while(hGroup.childCount < 5 && rIndex > 0) { // 5 because 3 items + 2 dividers
+                         hGroup.addView(View(this@MainActivity).apply { setBackgroundColor(Color.BLACK); layoutParams = LinearLayout.LayoutParams(4, ViewGroup.LayoutParams.MATCH_PARENT) })
+                         hGroup.addView(View(this@MainActivity).apply { layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f) })
+                     }
+                     outerGroup.addView(hGroup)
+                     if (rIndex < rows.size - 1) {
+                         outerGroup.addView(View(this@MainActivity).apply { setBackgroundColor(Color.BLACK); layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 4) })
+                     }
+                 }
+                 allViews.forEach { it.setBackgroundColor(Color.TRANSPARENT); it.setTextColor(Color.BLACK) }
+                 if(selected < allViews.size) {
+                     allViews[selected].setBackgroundColor(Color.BLACK)
+                     allViews[selected].setTextColor(Color.WHITE)
+                 }
+                 root.addView(outerGroup)
+            }
+        }
+
+        fun addSliderControl(label: String, min: Int, max: Int, defaultVal: Int) {
+            val wrap = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, 16, 0, 32)
+            }
+            val headerRow = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+            }
+            headerRow.addView(TextView(this@MainActivity).apply {
+                text = label
+                textSize = 20f
+                setTextColor(Color.BLACK)
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            })
+            val valText = TextView(this@MainActivity).apply {
+                text = defaultVal.toString()
+                textSize = 24f
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                setTextColor(Color.BLACK)
+            }
+            headerRow.addView(valText)
+            wrap.addView(headerRow)
+
+            val einkSeekBar = SeekBar(this@MainActivity).apply {
+                this.max = max - min
+                this.progress = defaultVal - min
+                setPadding(0, 32, 0, 32)
+                progressDrawable?.setTint(Color.BLACK)
+                thumb?.setTint(Color.BLACK)
+                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(seekBar: SeekBar?, prog: Int, fromUser: Boolean) {
+                        val realVal = prog + min
+                        valText.text = realVal.toString()
+                    }
+                    override fun onStartTrackingTouch(p0: SeekBar?) {}
+                    override fun onStopTrackingTouch(p0: SeekBar?) {}
+                })
+            }
+            wrap.addView(einkSeekBar)
+            root.addView(wrap)
+        }
+        
+        fun addInputMock(label: String, defaultVal: String) {
+             val box = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(32, 40, 32, 40)
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 16, 0, 32) }
+                background = android.graphics.drawable.GradientDrawable().apply { setStroke(4, Color.BLACK) }
+                gravity = android.view.Gravity.CENTER_VERTICAL
+            }
+            box.addView(TextView(this@MainActivity).apply {
+                text = label
+                textSize = 20f
+                setTextColor(Color.BLACK)
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            })
+            box.addView(TextView(this@MainActivity).apply {
+                text = defaultVal
+                textSize = 20f
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                setTextColor(Color.BLACK)
+            })
+            root.addView(box)
+        }
+
+        // --- Sections Replicating buildSettingsPage exactly ---
+        
+        addSectionTitle("数据与统计", "周期、数据口径、时长单位与日期范围")
+        addToggle("最近阅读包含未读（readingStatus=0）", false)
+        addSegmented("统计周期", listOf("当天", "昨天", "本周", "上周", "最近7天", "最近30天", "自定义起止"), 2, isVertical = false)
+        addSegmented("数据口径", listOf("按阅读时长事件（推荐）", "按有路径会话", "按Metadata最近访问"), 0, isVertical = true)
+        addSegmented("壁纸类型", listOf("统计壁纸", "当前阅读封面(实验性,较耗电)", "自动(熄屏优先封面)(实验性)"), 0, isVertical = true)
+        addHint("提示：封面模式依赖 NeoReader 元数据落库。通常需要先退出当前正在阅读的书籍再锁屏，才会刷新到最新封面；如果在书籍打开状态下直接锁屏，往往仍显示旧封面，通常下一次锁屏才会生效。")
+        addSegmented("封面显示方式", listOf("完整显示", "铺满裁切"), 0, isVertical = false)
+        addSliderControl("最小时长阈值（分钟，作用于“按阅读时长事件”）", 1, 60, 1)
+        addSegmented("时长显示单位", listOf("小时", "分钟"), 0, isVertical = false)
+        addInputMock("选择起始日期", "点击选择")
+        addInputMock("选择结束日期", "点击选择")
+        
+        addSectionTitle("书单筛选", "控制展示书目与统计阈值")
+        addSegmented("书单筛选（状态）", listOf("全部", "仅在读", "仅已读完"), 0, isVertical = false)
+        addSliderControl("Top N（最多显示书籍数量）", 1, 5, 5)
+
+        addSectionTitle("排版与字体", "标题、字号、进度与字体")
+        addInputMock("账单标题", "阅读账单")
+        addSliderControl("标题字号", 24, 120, 74)
+        addSliderControl("正文字号基准", 18, 60, 34)
+        addSegmented("单号数字模式", listOf("月日", "随机", "自定义"), 0, isVertical = false)
+        addInputMock("自定义数字", "")
+        addSliderControl("单号数字字号", 24, 140, 46)
+        addToggle("显示进度和状态行", true)
+        addSegmented("进度显示方式", listOf("页数", "百分比"), 0, isVertical = false)
+        addToggle("显示作者行（在进度行上方）", true)
+        addInputMock("标题字体（系统字体）", "SERIF_BOLD ▼")
+        addInputMock("正文字体（系统字体）", "MONO ▼")
+        addInputMock("选择字体目录（SAF）", "更换 ▼")
+
+        addSectionTitle("图表", "图形样式与坐标设置")
+        addToggle("显示下方周曲线图", true)
+        addSegmented("图表样式", listOf("折线", "柱状"), 0, isVertical = false)
+        addHint("图表横轴规则：当天/昨天=按小时；本周/上周/最近7天=按天；最近30天=按天；自定义<=14天按天，15-90天按周，>90天按月。")
+        addToggle("显示峰值标签", true)
+        addSegmented("Y轴最大值", listOf("自动", "固定"), 0, isVertical = false)
+        addSliderControl("Y轴固定最大值(分钟)", 1, 2000, 300)
+
+        addSectionTitle("底部备注与条码", "备注文本与装饰条码参数")
+        addSegmented("底部备注/条码", listOf("不显示", "只显示备注", "显示条码 + 备注"), 0, isVertical = true)
+        addInputMock("备注文本 / 条码内容", "点击设置")
+        addSegmented("条码粗细强度", listOf("细(0.8x)", "标准(1.0x)", "粗(1.2x)"), 1, isVertical = false)
+        addSegmented("条码留白密度", listOf("紧凑", "标准", "疏松"), 1, isVertical = false)
+
+        addSectionTitle("自动刷新", "默认自动模式，可切换定时或熄屏触发")
+        addToggle("启用自动刷新与自动覆盖保存", true)
+        addSegmented("自动刷新模式", listOf("每日定时一次（省电，推荐）", "熄屏触发（更实时，较耗电）"), 0, isVertical = true)
+        addInputMock("每日执行时间", "22:30")
+        addSliderControl("熄屏触发最小间隔(分)", 1, 240, 3)
+        addHint("提示：熄屏触发会增加唤醒次数与耗电；NeoReader 常在退出当前书籍/会话落库后才更新元数据，所以可能出现“本次锁屏仍是旧封面、下次锁屏生效”的现象。")
+
+        scroll.addView(root)
+        return scroll
+    }
+
     private fun showSettingsPage() {
+        currentPageKey = "settings"
         settingsPage.visibility = View.VISIBLE
         previewPage.visibility = View.GONE
+        einkUiPage.visibility = View.GONE
+        updateTopNavState?.invoke()
     }
 
     private fun showPreviewPage() {
+        currentPageKey = "preview"
         settingsPage.visibility = View.GONE
         previewPage.visibility = View.VISIBLE
+        einkUiPage.visibility = View.GONE
+        updateTopNavState?.invoke()
         refreshPreview()
+    }
+
+    private fun showEinkUiPage() {
+        currentPageKey = "eink"
+        settingsPage.visibility = View.GONE
+        previewPage.visibility = View.GONE
+        einkUiPage.visibility = View.VISIBLE
+        updateTopNavState?.invoke()
     }
 
     private fun refreshPreviewData() {
