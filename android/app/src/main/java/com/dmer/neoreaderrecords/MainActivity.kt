@@ -862,10 +862,16 @@ class MainActivity : ComponentActivity() {
         }
 
         root.addView(TextView(this).apply {
-            text = "阅读壁纸设置 (墨水屏新版)"
+            text = "阅读壁纸设置"
             textSize = 28f
             setTextColor(Color.BLACK)
             setTypeface(Typeface.DEFAULT_BOLD)
+            setPadding(0, 0, 0, 8)
+        })
+        root.addView(TextView(this).apply {
+            text = "提示：少数情况下，锁屏时系统可能还没读取到刚生成的壁纸，通常下一次锁屏会显示最新结果。"
+            textSize = 14f
+            setTextColor(Color.DKGRAY)
             setPadding(0, 0, 0, 40)
         })
 
