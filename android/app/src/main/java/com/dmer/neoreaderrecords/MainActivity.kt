@@ -101,6 +101,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var autoModeHintText: TextView
     private lateinit var autoStateText: TextView
     private lateinit var updateStatusText: TextView
+    private lateinit var wereadApiKeyInput: EditText
+    private lateinit var wereadStatusText: TextView
     private lateinit var pickFontDirBtn: Button
     private lateinit var titleFontSpinner: Spinner
     private lateinit var bodyFontSpinner: Spinner
@@ -129,6 +131,7 @@ class MainActivity : ComponentActivity() {
     private var metadataRowsDebugReport: String = ""
     private var uiDebugReport: String = ""
     private var isCheckingUpdates: Boolean = false
+    private var isTestingWeRead: Boolean = false
     private val debugLogName = "neoreader_debug_log.txt"
     private var selectedFontDirUri: String? = null
 
@@ -821,6 +824,21 @@ class MainActivity : ComponentActivity() {
             return row
         }
 
+        fun bindSecretEditRow(label: String, target: EditText): LinearLayout {
+            fun masked(): String = WeReadClient.maskKey(target.text.toString()) + " ▼"
+            val (row, value) = bindInputRow(label, { masked() }) {
+                openTextEditDialog(label, target)
+            }
+            target.addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    value.text = masked()
+                }
+                override fun afterTextChanged(s: Editable?) {}
+            })
+            return row
+        }
+
         fun bindSpinnerRow(label: String, spinner: Spinner): LinearLayout {
             lateinit var value: TextView
             val (row, valueView) = bindInputRow(label, {
@@ -1096,6 +1114,35 @@ class MainActivity : ComponentActivity() {
             root.addView(this)
         }
         val autoWarningText = addHint("提示：熄屏触发会增加唤醒次数与耗电；NeoReader 常在退出当前书籍/会话落库后才更新元数据，所以可能出现“本次锁屏仍是旧封面、下次锁屏生效”的现象。")
+
+        addSectionTitle("微信读书", "第一阶段只配置 Key 并测试连接，不参与壁纸生成")
+        wereadApiKeyInput = makeInput(WeReadClient.loadApiKey(this))
+        val wereadKeyRow = bindSecretEditRow("API Key", wereadApiKeyInput)
+        wereadStatusText = TextView(this).apply {
+            textSize = 13f
+            setTextColor(Color.DKGRAY)
+            setPadding(0, 0, 0, 16)
+            root.addView(this)
+        }
+        val wereadButtons = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 0, 0, 24)
+        }
+        wereadButtons.addView(Button(this).apply {
+            text = "保存 Key"
+            setOnClickListener {
+                saveWeReadApiKeyFromUi()
+                renderWeReadState(WeReadClient.cachedState(this@MainActivity))
+                writeDebugLog("weread_key_saved")
+            }
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 12, 0) })
+        wereadButtons.addView(Button(this).apply {
+            text = "测试连接"
+            setOnClickListener { testWeReadConnection() }
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        root.addView(wereadButtons)
+        addHint("说明：当前只调用微信读书 Skill API 的 /shelf/sync 验证 Key 是否可用；Key 只保存在本机 App 配置中，日志只记录脱敏后的 Key。")
+        renderWeReadState(WeReadClient.cachedState(this))
 
         addSectionTitle("版本与更新", "GitHub Release 分发与更新检查")
         updateStatusText = TextView(this).apply {
@@ -1458,6 +1505,44 @@ class MainActivity : ComponentActivity() {
     private fun updateReleaseStatusFromCache() {
         if (!::updateStatusText.isInitialized) return
         renderReleaseState(GitHubReleaseChecker.cachedState(this))
+    }
+
+    private fun saveWeReadApiKeyFromUi() {
+        if (!::wereadApiKeyInput.isInitialized) return
+        WeReadClient.saveApiKey(this, wereadApiKeyInput.text.toString())
+        appendUiDebug("weread api key saved key=${WeReadClient.maskKey(wereadApiKeyInput.text.toString())}")
+    }
+
+    private fun testWeReadConnection() {
+        if (isTestingWeRead) return
+        saveWeReadApiKeyFromUi()
+        isTestingWeRead = true
+        if (::wereadStatusText.isInitialized) {
+            wereadStatusText.text = "微信读书：正在测试连接..."
+        }
+        Thread {
+            val result = WeReadClient.testConnection(applicationContext, WeReadClient.loadApiKey(applicationContext))
+            runOnUiThread {
+                isTestingWeRead = false
+                renderWeReadState(WeReadClient.cachedState(this))
+                if (::wereadStatusText.isInitialized) {
+                    wereadStatusText.text = "${wereadStatusText.text}\n本次结果：${result.detail.take(160)}"
+                }
+                appendUiDebug("weread test ok=${result.ok} detail=${result.detail.take(120)}")
+                writeDebugLog("weread_test")
+            }
+        }.start()
+    }
+
+    private fun renderWeReadState(state: WeReadClient.State) {
+        if (!::wereadStatusText.isInitialized) return
+        val checkedAt = if (state.lastTestMs > 0L) {
+            SimpleDateFormat("MM-dd HH:mm", Locale.US).format(Date(state.lastTestMs))
+        } else {
+            "尚未测试"
+        }
+        val error = if (state.error.isBlank()) "" else "\n失败原因：${state.error.take(120)}"
+        wereadStatusText.text = "微信读书 Key：${state.maskedKey}\n连接状态：${state.status}\n最近测试：$checkedAt$error"
     }
 
     private fun checkForUpdatesIfNeeded(force: Boolean) {
@@ -1883,6 +1968,12 @@ class MainActivity : ComponentActivity() {
                 w.append("time=").append(now).append('\n')
                 w.append("deviceIdentity=").append(deviceIdentityText()).append('\n')
                 w.append("detectedBooxDevicePreset=").append(detectBooxDevicePreset()).append('\n')
+                val wereadState = WeReadClient.cachedState(this)
+                w.append("weread=").append("key=").append(wereadState.maskedKey)
+                    .append(", status=").append(wereadState.status)
+                    .append(", lastTestMs=").append(wereadState.lastTestMs.toString())
+                    .append(", error=").append(wereadState.error)
+                    .append('\n')
                 w.append("currentPageKey=").append(currentPageKey).append('\n')
                 if (::settingsPage.isInitialized) {
                     w.append("settingsPageVisibility=").append(settingsPage.visibility.toString()).append('\n')
