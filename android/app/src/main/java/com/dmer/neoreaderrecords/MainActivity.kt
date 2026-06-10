@@ -416,7 +416,7 @@ class MainActivity : ComponentActivity() {
         ).joinToString(", ")
     }
 
-    private fun detectBooxDevicePreset(): String {
+    private fun detectBooxDevicePresetOrNull(): String? {
         val raw = listOf(
             android.os.Build.MANUFACTURER,
             android.os.Build.BRAND,
@@ -446,8 +446,12 @@ class MainActivity : ComponentActivity() {
             raw.contains("NOTE") && raw.contains("AIR") && raw.contains("3") && raw.contains("C") -> "NOTE_AIR3C"
             raw.contains("NOTE") && raw.contains("AIR") && raw.contains("3") -> "NOTE_AIR3"
             raw.contains("PAGE") -> "PAGE"
-            else -> BooxDevicePresets.DEFAULT_KEY
+            else -> null
         }
+    }
+
+    private fun detectBooxDevicePreset(): String {
+        return detectBooxDevicePresetOrNull() ?: BooxDevicePresets.DEFAULT_KEY
     }
 
     private fun booxPresetKeyByRadioId(id: Int): String {
@@ -893,9 +897,10 @@ class MainActivity : ComponentActivity() {
         val wallpaperNames = listOf("STATS", "COVER", "AUTO_COVER")
         wallpaperModeGroup = makeRadioGroup(wallpaperOptions, selectedId(prefs.getString("wallpaper_mode", "STATS") ?: "STATS", 1201, wallpaperOptions, wallpaperNames))
 
-        val detectedBooxPreset = detectBooxDevicePreset()
+        val matchedBooxPreset = detectBooxDevicePresetOrNull()
+        val detectedBooxPreset = matchedBooxPreset ?: BooxDevicePresets.DEFAULT_KEY
         val booxDevicePresetOptions = BooxDevicePresets.all.mapIndexed { index, preset ->
-            val matchMark = if (preset.key == detectedBooxPreset) " [本机匹配]" else ""
+            val matchMark = if (matchedBooxPreset != null && preset.key == matchedBooxPreset) " [本机匹配]" else ""
             (1301 + index) to "${preset.label}$matchMark\n${preset.inchText} ${preset.heightPx}x${preset.widthPx}"
         }
         val booxDevicePresetNames = BooxDevicePresets.all.map { it.key }
@@ -905,7 +910,7 @@ class MainActivity : ComponentActivity() {
         } else {
             detectedBooxPreset
         }
-        appendUiDebug("booxDevicePreset default=$defaultBooxDevicePreset hasSaved=${prefs.contains("boox_device_preset")} userSet=$hasManualBooxPreset device=${deviceIdentityText()}")
+        appendUiDebug("booxDevicePreset default=$defaultBooxDevicePreset matched=${matchedBooxPreset ?: "none"} hasSaved=${prefs.contains("boox_device_preset")} userSet=$hasManualBooxPreset device=${deviceIdentityText()}")
         booxDevicePresetGroup = makeRadioGroup(
             booxDevicePresetOptions,
             selectedId(
@@ -991,7 +996,7 @@ class MainActivity : ComponentActivity() {
         addSectionTitle("数据与统计", "周期、数据口径、时长单位与日期范围")
         val booxDevicePresetRow = bindRadioChoiceRow("阅读器尺寸预设", booxDevicePresetGroup, booxDevicePresetOptions)
         appendUiDebug("buildSettingsPage added booxDevicePresetRow rootChildCount=${root.childCount} rowChildren=${booxDevicePresetRow.childCount}")
-        addHint("说明：这里只保存阅读器和屏幕尺寸选择；暂时不影响生成图片。默认 Leaf5。")
+        addHint("说明：首次会根据本机型号自动匹配；匹配不到时默认 Leaf5。这个选项会影响预览和生成壁纸的图片分辨率。")
         val periodSegment = bindSegmented("统计周期", periodGroup, periodOptions, isVertical = false)
         addHint("说明：选择账单统计哪一段时间；自定义模式会显示起止日期选择。")
         val sourceSegment = bindSegmented("数据口径", sourceGroup, sourceOptions, isVertical = true)
