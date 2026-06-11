@@ -20,10 +20,33 @@ class AutoRefreshWorker(context: Context, params: WorkerParameters) : Worker(con
         
         val prefs = applicationContext.getSharedPreferences(AutoRefreshConfig.PREFS_NAME, Context.MODE_PRIVATE)
         val wallpaperMode = prefs.getString("wallpaper_mode", "STATS") ?: "STATS"
+        val sourceMode = prefs.getString("source_mode", "DURATION") ?: "DURATION"
         val now = System.currentTimeMillis()
         val minIntervalMs = AutoRefreshConfig.minIntervalMinutes(applicationContext) * 60_000L
         val lastMs = prefs.getLong(AutoRefreshConfig.KEY_LAST_TRIGGER_MS, 0L)
         val delta = now - lastMs
+
+        if (sourceMode == "WEREAD") {
+            if (reason != "screen_on_prewarm") {
+                AutoRefreshLog.i(applicationContext, "Worker skip WeRead source on reason=$reason")
+                return Result.success()
+            }
+            if (delta < minIntervalMs) {
+                AutoRefreshLog.i(applicationContext, "Worker skip WeRead by debounce: delta=${delta}ms < $minIntervalMs ms")
+                return Result.success()
+            }
+            val ok = AutoWallpaperGenerator.generateAndSaveWeRead(applicationContext, reason)
+            if (ok) {
+                prefs.edit()
+                    .putLong(AutoRefreshConfig.KEY_LAST_TRIGGER_MS, now)
+                    .putString(AutoRefreshConfig.KEY_LAST_REASON, reason)
+                    .apply()
+                AutoRefreshLog.i(applicationContext, "Worker success saved WeRead")
+                return Result.success()
+            }
+            AutoRefreshLog.i(applicationContext, "Worker WeRead failed -> retry")
+            return Result.retry()
+        }
 
         var shouldGenerate = true
         var latestBookKey = ""

@@ -105,6 +105,20 @@ object AutoWallpaperGenerator {
         }
     }
 
+    fun generateAndSaveWeRead(context: Context, reason: String): Boolean {
+        AutoRefreshLog.i(context, "WeRead auto generator start reason=$reason")
+        return runCatching {
+            val s = readSettings(context)
+            val built = buildWeReadPreviewForWallpaperMode(context, s.wallpaperMode) ?: return false
+            val path = saveBitmap(context, built.bitmap)
+            AutoRefreshLog.i(context, "WeRead auto saved path=$path ${built.summary}")
+            true
+        }.getOrElse {
+            AutoRefreshLog.e(context, "WeRead auto generator exception", it)
+            false
+        }
+    }
+
     fun buildPreviewFromPrefs(context: Context, sourceMark: String = "M"): PreviewResult? {
         return runCatching { buildPreviewInternal(context, sourceMark, false) }.getOrNull()
     }
@@ -161,6 +175,15 @@ object AutoWallpaperGenerator {
             }
             PreviewResult(rendered, summary)
         }.getOrNull()
+    }
+
+    private fun buildWeReadPreviewForWallpaperMode(context: Context, wallpaperMode: String): PreviewResult? {
+        return when (wallpaperMode) {
+            "COVER" -> buildWeReadCoverPreviewFromPrefs(context, "W")
+            "AUTO_COVER" -> buildWeReadCoverPreviewFromPrefs(context, "W")
+                ?: buildWeReadStatsPreviewFromPrefs(context, "W")
+            else -> buildWeReadStatsPreviewFromPrefs(context, "W")
+        }
     }
 
     private fun buildPreviewInternal(context: Context, sourceMark: String, fromAutoWorker: Boolean): PreviewResult? {
