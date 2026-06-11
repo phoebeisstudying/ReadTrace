@@ -64,9 +64,17 @@ object WeReadClient {
     )
 
     data class WallpaperBook(
+        val bookId: String,
         val title: String,
         val author: String,
         val readSeconds: Long
+    )
+
+    data class BookProgressResult(
+        val ok: Boolean,
+        val progressPercent: Int?,
+        val recordReadingSeconds: Long,
+        val detail: String
     )
 
     data class WallpaperStatsResult(
@@ -408,7 +416,8 @@ object WeReadClient {
                     val author = book?.optString("author")?.takeIf { it.isNotBlank() }
                         ?: album?.optString("authorName")?.takeIf { it.isNotBlank() }
                         ?: "未知"
-                    books.add(WallpaperBook(title, author, item.optLong("readTime", 0L)))
+                    val bookId = book?.optString("bookId")?.takeIf { it.isNotBlank() }.orEmpty()
+                    books.add(WallpaperBook(bookId, title, author, item.optLong("readTime", 0L)))
                 }
             }
             val total = json.optLong("totalReadTime", 0L)
@@ -419,6 +428,40 @@ object WeReadClient {
         } catch (e: Exception) {
             AutoRefreshLog.e(context, "WeRead wallpaper stats failed mode=$mode", e)
             WallpaperStatsResult(false, "读取失败", "${e.javaClass.simpleName}: ${e.message ?: "读取失败"}", mode, 0L, 0L, 0, emptyList(), emptyList())
+        }
+    }
+
+    fun fetchBookProgress(context: Context, apiKey: String, bookId: String): BookProgressResult {
+        val key = apiKey.trim()
+        if (key.isBlank()) return BookProgressResult(false, null, 0L, "未配置 API Key")
+        if (bookId.isBlank()) return BookProgressResult(false, null, 0L, "缺少 bookId")
+        return try {
+            val body = JSONObject()
+                .put("api_name", "/book/getprogress")
+                .put("bookId", bookId)
+                .put("skill_version", SKILL_VERSION)
+            val result = postJson(key, body.toString())
+            AutoRefreshLog.i(context, "WeRead book progress http bookId=${bookId.take(10)} code=${result.code} bytes=${result.body.length}")
+            if (result.code !in 200..299) {
+                return BookProgressResult(false, null, 0L, "HTTP ${result.code}")
+            }
+            val json = JSONObject(result.body)
+            val upgradeInfo = json.optJSONObject("upgrade_info")
+            if (upgradeInfo != null) {
+                return BookProgressResult(false, null, 0L, "Skill 需要升级：${upgradeInfo.optString("message", "请升级 skill")}")
+            }
+            val errCode = json.optInt("errcode", 0)
+            if (errCode != 0) {
+                return BookProgressResult(false, null, 0L, "接口错误 errcode=$errCode ${json.optString("errmsg", "").take(80)}")
+            }
+            val book = json.optJSONObject("book")
+            val progress = book?.optInt("progress", -1)?.takeIf { it >= 0 }
+            val recordReadingTime = book?.optLong("recordReadingTime", 0L) ?: 0L
+            AutoRefreshLog.i(context, "WeRead book progress success bookId=${bookId.take(10)} progress=${progress ?: -1} recordReadingTime=$recordReadingTime")
+            BookProgressResult(true, progress, recordReadingTime, "progress=${progress ?: "-"} recordReadingTime=$recordReadingTime")
+        } catch (e: Exception) {
+            AutoRefreshLog.e(context, "WeRead book progress failed bookId=${bookId.take(10)}", e)
+            BookProgressResult(false, null, 0L, "${e.javaClass.simpleName}: ${e.message ?: "读取失败"}")
         }
     }
 

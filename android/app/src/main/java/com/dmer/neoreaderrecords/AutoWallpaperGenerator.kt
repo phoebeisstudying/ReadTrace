@@ -37,7 +37,8 @@ object AutoWallpaperGenerator {
         val author: String?,
         val progress: String?,
         val status: Int,
-        val progressLabel: String = "进度"
+        val progressText: String? = null,
+        val durationText: String? = null
     )
     private data class ChartStats(val totalMs: Long, val points: LongArray, val labels: List<String>)
     private data class WeReadBuildData(
@@ -55,6 +56,7 @@ object AutoWallpaperGenerator {
         val showChart: Boolean,
         val showProgressStatus: Boolean,
         val showAuthor: Boolean,
+        val showBookDuration: Boolean,
         val minDurationMinutes: Int,
         val topN: Int,
         val periodMode: String,
@@ -381,7 +383,7 @@ object AutoWallpaperGenerator {
         val books = bookMap.values
             .sortedByDescending { it.readSeconds }
             .take(s.topN)
-            .map { BookItem(it.title, it.author, WeReadClient.formatSeconds(it.readSeconds), 1, "时长") }
+            .map { toWeReadBookItem(context, key, it) }
         val note = if (monthStarts.size > 1 || s.periodMode != "LAST_30_DAYS") {
             "时长按日分桶精确过滤，书单按覆盖月份排行合并"
         } else {
@@ -426,7 +428,7 @@ object AutoWallpaperGenerator {
         val localBooks = queryTopBooksByDuration(context.contentResolver, range.first, range.second, s)
             .map { it.first to it.second }
         val weReadBooks = weReadBookScores.values.map { (book, scoreMs) ->
-            BookItem(book.title, book.author, formatDuration(scoreMs, s.timeUnit), 1, "时长") to scoreMs
+            toWeReadBookItem(context, key, book).copy(durationText = formatDuration(scoreMs, s.timeUnit)) to scoreMs
         }
         val mergedBooks = mergeScoredBooks(localBooks + weReadBooks, s.topN, s.timeUnit)
         val note = "本地+微信，图表按时间相加，书单按阅读时长合并排序"
@@ -493,8 +495,33 @@ object AutoWallpaperGenerator {
         }
         return durationByPath.mapNotNull { (path, ms) ->
             val item = metadata[path] ?: BookItem(File(path).nameWithoutExtension, null, null, 1)
-            item.copy(progress = formatDuration(ms, s.timeUnit)) to ms
+            item.copy(durationText = formatDuration(ms, s.timeUnit)) to ms
         }.sortedByDescending { it.second }
+    }
+
+    private fun toWeReadBookItem(context: Context, apiKey: String, book: WeReadClient.WallpaperBook): BookItem {
+        val progress = if (book.bookId.isNotBlank()) {
+            WeReadClient.fetchBookProgress(context, apiKey, book.bookId)
+        } else {
+            null
+        }
+        val progressValue = progress?.progressPercent
+        val progressText = progressValue?.let { "${it.coerceIn(0, 100)}%" }
+        val status = when {
+            progressValue != null && progressValue >= 100 -> 2
+            progressValue != null && progressValue > 0 -> 1
+            book.readSeconds > 0L -> 1
+            else -> 0
+        }
+        val durationSeconds = progress?.recordReadingSeconds?.takeIf { it > 0L } ?: book.readSeconds
+        return BookItem(
+            title = book.title,
+            author = book.author,
+            progress = null,
+            status = status,
+            progressText = progressText,
+            durationText = WeReadClient.formatSeconds(durationSeconds)
+        )
     }
 
     private fun mergeScoredBooks(items: List<Pair<BookItem, Long>>, limit: Int, unit: String): List<BookItem> {
@@ -506,7 +533,8 @@ object AutoWallpaperGenerator {
                 book to score
             } else {
                 val total = old.second + score
-                old.first.copy(progress = formatDuration(total, unit), progressLabel = "时长") to total
+                val base = if (old.first.progressText.isNullOrBlank() && !book.progressText.isNullOrBlank()) book else old.first
+                base.copy(durationText = formatDuration(total, unit)) to total
             }
         }
         return merged.values
@@ -895,6 +923,7 @@ object AutoWallpaperGenerator {
             showChart = p.getBoolean("show_chart", true),
             showProgressStatus = p.getBoolean("show_progress_status", true),
             showAuthor = p.getBoolean("show_author", true),
+            showBookDuration = p.getBoolean("show_book_duration", true),
             minDurationMinutes = p.getInt("min_duration_minutes", 1).coerceAtLeast(0),
             topN = p.getInt("top_n", 5).coerceIn(1, 5),
             periodMode = p.getString("period_mode", "THIS_WEEK") ?: "THIS_WEEK",
@@ -1000,8 +1029,9 @@ object AutoWallpaperGenerator {
             if (s0.showProgressStatus) {
                 y += s(50f)
                 val st = when (b.status) { 2 -> "已读完"; 1 -> "阅读中"; else -> "未读" }
-                val value = if (b.progressLabel == "进度") formatProgress(b.progress, s0.progressMode) else (b.progress ?: "-")
-                c.drawText("${b.progressLabel}:$value  状态:$st", s(260f), y, mono)
+                val value = b.progressText ?: formatProgress(b.progress, s0.progressMode)
+                val duration = if (s0.showBookDuration && !b.durationText.isNullOrBlank()) "  时长:${b.durationText}" else ""
+                c.drawText("进度:$value  状态:$st$duration", s(260f), y, mono)
             }
         }
 

@@ -68,6 +68,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var showChartCheck: CheckBox
     private lateinit var showProgressStatusCheck: CheckBox
     private lateinit var showAuthorCheck: CheckBox
+    private lateinit var showBookDurationCheck: CheckBox
     private lateinit var minDurationInput: EditText
     private lateinit var topNInput: EditText
     private lateinit var titleInput: EditText
@@ -169,6 +170,7 @@ class MainActivity : ComponentActivity() {
         val showChart: Boolean,
         val showProgressStatus: Boolean,
         val showAuthor: Boolean,
+        val showBookDuration: Boolean,
         val minDurationMinutes: Int,
         val topN: Int,
         val weekStartYmd: String,
@@ -999,6 +1001,7 @@ class MainActivity : ComponentActivity() {
         includeUnreadCheck = makeCheck(prefs.getBoolean("include_unread", false))
         showProgressStatusCheck = makeCheck(prefs.getBoolean("show_progress_status", true))
         showAuthorCheck = makeCheck(prefs.getBoolean("show_author", true))
+        showBookDurationCheck = makeCheck(prefs.getBoolean("show_book_duration", true))
         showChartCheck = makeCheck(prefs.getBoolean("show_chart", true))
         showPeakLabelCheck = makeCheck(prefs.getBoolean("show_peak_label", true))
         autoRefreshCheck = makeCheck(prefs.getBoolean(AutoRefreshConfig.KEY_AUTO_ENABLED, true))
@@ -1061,6 +1064,8 @@ class MainActivity : ComponentActivity() {
         val progressSegment = bindSegmented("进度显示方式", progressModeGroup, progressOptions, isVertical = false)
         val authorRow = bindToggle("显示作者行（在进度行上方）", showAuthorCheck)
         addHint("说明：如果文石元数据里没有作者，会显示未知；关闭后可节省空间。")
+        val bookDurationRow = bindToggle("显示每本书籍阅读时长", showBookDurationCheck)
+        addHint("说明：打开后会在每本书的状态后追加“时长”；Neo 阅读器按本地阅读事件统计，微信读书按接口返回的阅读时长显示。")
         val titleFontRow = bindSpinnerRow("标题字体（系统字体）", titleFontSpinner)
         val bodyFontRow = bindSpinnerRow("正文字体（系统字体）", bodyFontSpinner)
         pickFontDirBtn = Button(this).apply {
@@ -1287,6 +1292,9 @@ class MainActivity : ComponentActivity() {
             if (!isInitializingUi) applySettingsPreview()
         }
         showAuthorCheck.setOnCheckedChangeListener { _, _ ->
+            if (!isInitializingUi) applySettingsPreview()
+        }
+        showBookDurationCheck.setOnCheckedChangeListener { _, _ ->
             if (!isInitializingUi) applySettingsPreview()
         }
         showPeakLabelCheck.setOnCheckedChangeListener { _, _ ->
@@ -1966,6 +1974,7 @@ class MainActivity : ComponentActivity() {
         val showChart = showChartCheck.isChecked
         val showProgressStatus = showProgressStatusCheck.isChecked
         val showAuthor = showAuthorCheck.isChecked
+        val showBookDuration = showBookDurationCheck.isChecked
         val minDurationMinutes = minDurationInput.text.toString().trim().toIntOrNull()?.coerceAtLeast(0) ?: 1
         val topN = topNInput.text.toString().trim().toIntOrNull()?.coerceIn(1, 5) ?: 5
         val weekStart = selectedWeekStartYmd.ifBlank { currentWeekStartYmd() }
@@ -2048,7 +2057,7 @@ class MainActivity : ComponentActivity() {
         }
         val titleFont = fontSpec(titleFontSpinner.selectedItem?.toString() ?: "SERIF_BOLD")
         val bodyFont = fontSpec(bodyFontSpinner.selectedItem?.toString() ?: "MONO")
-        return Settings(includeUnread, showChart, showProgressStatus, showAuthor, minDurationMinutes, topN, weekStart, weekEnd, periodMode, readingFilterMode, sourceMode, wallpaperMode, coverFitMode, progressMode, timeUnit, receiptTitle, receiptTitleSize, receiptBodySize, serialNumberMode, serialNumberCustom, serialNumberSize, booxDevicePreset, footerMode, barcodeWidthScale, barcodeGapMode, noteText, chartStyleMode, showPeakLabel, yAxisMode, yAxisFixedMaxMinutes, titleFont, bodyFont)
+        return Settings(includeUnread, showChart, showProgressStatus, showAuthor, showBookDuration, minDurationMinutes, topN, weekStart, weekEnd, periodMode, readingFilterMode, sourceMode, wallpaperMode, coverFitMode, progressMode, timeUnit, receiptTitle, receiptTitleSize, receiptBodySize, serialNumberMode, serialNumberCustom, serialNumberSize, booxDevicePreset, footerMode, barcodeWidthScale, barcodeGapMode, noteText, chartStyleMode, showPeakLabel, yAxisMode, yAxisFixedMaxMinutes, titleFont, bodyFont)
     }
 
     private fun saveSettings(settings: Settings) {
@@ -2058,6 +2067,7 @@ class MainActivity : ComponentActivity() {
             .putBoolean("show_chart", settings.showChart)
             .putBoolean("show_progress_status", settings.showProgressStatus)
             .putBoolean("show_author", settings.showAuthor)
+            .putBoolean("show_book_duration", settings.showBookDuration)
             .putInt("min_duration_minutes", settings.minDurationMinutes)
             .putInt("top_n", settings.topN)
             .putString("week_start", settings.weekStartYmd)
@@ -2265,6 +2275,7 @@ class MainActivity : ComponentActivity() {
                     .append(", showChart=").append(s.showChart.toString())
                     .append(", showProgressStatus=").append(s.showProgressStatus.toString())
                     .append(", showAuthor=").append(s.showAuthor.toString())
+                    .append(", showBookDuration=").append(s.showBookDuration.toString())
                     .append(", minDuration=").append(s.minDurationMinutes.toString())
                     .append(", topN=").append(s.topN.toString())
                     .append(", sourceMode=").append(s.sourceMode.name)
