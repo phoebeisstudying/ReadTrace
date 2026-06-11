@@ -32,7 +32,13 @@ object AutoWallpaperGenerator {
     private val statsUri = Uri.parse("content://com.onyx.kreader.statistics.provider/OnyxStatisticsModel")
     private const val DAY_MS = 86_400_000L
 
-    private data class BookItem(val title: String, val author: String?, val progress: String?, val status: Int)
+    private data class BookItem(
+        val title: String,
+        val author: String?,
+        val progress: String?,
+        val status: Int,
+        val progressLabel: String = "进度"
+    )
     private data class ChartStats(val totalMs: Long, val points: LongArray, val labels: List<String>)
     private data class WeReadBuildData(
         val rangeStart: Long,
@@ -375,7 +381,7 @@ object AutoWallpaperGenerator {
         val books = bookMap.values
             .sortedByDescending { it.readSeconds }
             .take(s.topN)
-            .map { BookItem(it.title, it.author, WeReadClient.formatSeconds(it.readSeconds), 1) }
+            .map { BookItem(it.title, it.author, WeReadClient.formatSeconds(it.readSeconds), 1, "时长") }
         val note = if (monthStarts.size > 1 || s.periodMode != "LAST_30_DAYS") {
             "时长按日分桶精确过滤，书单按覆盖月份排行合并"
         } else {
@@ -420,7 +426,7 @@ object AutoWallpaperGenerator {
         val localBooks = queryTopBooksByDuration(context.contentResolver, range.first, range.second, s)
             .map { it.first to it.second }
         val weReadBooks = weReadBookScores.values.map { (book, scoreMs) ->
-            BookItem(book.title, book.author, formatDuration(scoreMs, s.timeUnit), 1) to scoreMs
+            BookItem(book.title, book.author, formatDuration(scoreMs, s.timeUnit), 1, "时长") to scoreMs
         }
         val mergedBooks = mergeScoredBooks(localBooks + weReadBooks, s.topN, s.timeUnit)
         val note = "本地+微信，图表按时间相加，书单按阅读时长合并排序"
@@ -500,7 +506,7 @@ object AutoWallpaperGenerator {
                 book to score
             } else {
                 val total = old.second + score
-                old.first.copy(progress = formatDuration(total, unit)) to total
+                old.first.copy(progress = formatDuration(total, unit), progressLabel = "时长") to total
             }
         }
         return merged.values
@@ -994,7 +1000,8 @@ object AutoWallpaperGenerator {
             if (s0.showProgressStatus) {
                 y += s(50f)
                 val st = when (b.status) { 2 -> "已读完"; 1 -> "阅读中"; else -> "未读" }
-                c.drawText("进度:${formatProgress(b.progress, s0.progressMode)}  状态:$st", s(260f), y, mono)
+                val value = if (b.progressLabel == "进度") formatProgress(b.progress, s0.progressMode) else (b.progress ?: "-")
+                c.drawText("${b.progressLabel}:$value  状态:$st", s(260f), y, mono)
             }
         }
 
