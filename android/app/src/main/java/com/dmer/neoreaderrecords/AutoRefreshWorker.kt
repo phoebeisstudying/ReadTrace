@@ -43,9 +43,7 @@ class AutoRefreshWorker(context: Context, params: WorkerParameters) : Worker(con
             prefs.edit()
                 .putLong(AutoRefreshConfig.KEY_WEREAD_LAST_PREWARM_MS, now)
                 .apply()
-            AutoRefreshLog.i(applicationContext, "Worker WeRead wait network settle 3500ms before request")
-            Thread.sleep(3_500L)
-            val ok = AutoWallpaperGenerator.generateAndSaveWeRead(applicationContext, reason)
+            val ok = runWeReadWithNetworkRetries(reason)
             if (ok) {
                 prefs.edit()
                     .putLong(AutoRefreshConfig.KEY_LAST_TRIGGER_MS, now)
@@ -98,6 +96,27 @@ class AutoRefreshWorker(context: Context, params: WorkerParameters) : Worker(con
         }
         AutoRefreshLog.i(applicationContext, "Worker failed -> retry")
         return Result.retry()
+    }
+
+    private fun runWeReadWithNetworkRetries(reason: String): Boolean {
+        val maxAttempts = 5
+        val firstDelayMs = 3_500L
+        val retryDelayMs = 3_000L
+        for (attempt in 1..maxAttempts) {
+            val delayMs = if (attempt == 1) firstDelayMs else retryDelayMs
+            AutoRefreshLog.i(
+                applicationContext,
+                "Worker WeRead wait network settle ${delayMs}ms before request attempt=$attempt/$maxAttempts"
+            )
+            Thread.sleep(delayMs)
+            val ok = AutoWallpaperGenerator.generateAndSaveWeRead(applicationContext, "$reason#$attempt")
+            if (ok) {
+                AutoRefreshLog.i(applicationContext, "Worker WeRead attempt success attempt=$attempt/$maxAttempts")
+                return true
+            }
+            AutoRefreshLog.i(applicationContext, "Worker WeRead attempt failed attempt=$attempt/$maxAttempts")
+        }
+        return false
     }
 
     private fun getLatestBookIdentifier(context: Context): String {

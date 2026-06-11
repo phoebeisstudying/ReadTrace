@@ -110,7 +110,7 @@ object AutoWallpaperGenerator {
         return runCatching {
             val s = readSettings(context)
             val built = buildWeReadPreviewForWallpaperMode(context, s.wallpaperMode) ?: return false
-            if ((reason == "screen_on_prewarm" || reason == "user_present_prewarm") &&
+            if ((reason.startsWith("screen_on_prewarm") || reason.startsWith("user_present_prewarm")) &&
                 built.summary.contains("source=fallback_cache")
             ) {
                 AutoRefreshLog.i(context, "WeRead auto skip saving fallback cache and request retry ${built.summary}")
