@@ -215,11 +215,8 @@ object AutoWallpaperGenerator {
             val s = readSettings(context)
             val tryCover = s.wallpaperMode == "COVER" || s.wallpaperMode == "AUTO_COVER"
             if (tryCover) {
-                buildWeReadCoverPreviewFromPrefs(context, sourceMark)?.let {
-                    return@runCatching PreviewResult(it.bitmap, "混合封面：微信读书优先，${it.summary}")
-                }
-                tryBuildCoverWallpaper(context, s.copy(sourceMode = "DURATION"), sourceMark)?.let {
-                    return@runCatching PreviewResult(it.bitmap, "混合封面：本地回退，${it.summary}")
+                buildMixedCoverPreview(context, s, sourceMark)?.let {
+                    return@runCatching it
                 }
                 if (s.wallpaperMode == "COVER") return@runCatching null
             }
@@ -239,6 +236,66 @@ object AutoWallpaperGenerator {
             "AUTO_COVER" -> buildWeReadCoverPreviewFromPrefs(context, "W")
                 ?: buildWeReadStatsPreviewFromPrefs(context, "W")
             else -> buildWeReadStatsPreviewFromPrefs(context, "W")
+        }
+    }
+
+    private fun buildMixedCoverPreview(context: Context, s: AutoSettings, sourceMark: String): PreviewResult? {
+        val localLatestMs = latestLocalCoverAccessMs(context)
+        val fetchedWeRead = WeReadClient.cacheLatestCover(context, WeReadClient.loadApiKey(context))
+        val weReadLatestMs = if (fetchedWeRead.ok) fetchedWeRead.readUpdateTimeMs else 0L
+        val weReadFirst = weReadLatestMs >= localLatestMs
+        AutoRefreshLog.i(
+            context,
+            "Mixed cover choose weReadFirst=$weReadFirst localLatestMs=$localLatestMs weReadLatestMs=$weReadLatestMs weReadOk=${fetchedWeRead.ok}"
+        )
+
+        fun renderWeReadFromFetched(): PreviewResult? {
+            if (!fetchedWeRead.ok) return null
+            val bmp = BitmapFactory.decodeFile(fetchedWeRead.cachePath) ?: return null
+            val rendered = renderCoverWallpaper(context, bmp, fetchedWeRead.title, sourceMark, s)
+            val source = if (fetchedWeRead.fromCache) "cache" else "network"
+            return PreviewResult(
+                rendered,
+                "混合封面：微信最新 title=${fetchedWeRead.title}, author=${fetchedWeRead.author}, source=$source, readUpdateTimeMs=$weReadLatestMs, localLatestMs=$localLatestMs, 输出=${canvasSizeText(s)}"
+            )
+        }
+
+        fun renderLocal(): PreviewResult? {
+            return tryBuildCoverWallpaper(context, s.copy(sourceMode = "DURATION"), sourceMark)
+                ?.let {
+                    PreviewResult(
+                        it.bitmap,
+                        "混合封面：本地最新 ${it.summary}, localLatestMs=$localLatestMs, weReadLatestMs=$weReadLatestMs"
+                    )
+                }
+        }
+
+        return if (weReadFirst) {
+            renderWeReadFromFetched() ?: renderLocal()
+        } else {
+            renderLocal() ?: renderWeReadFromFetched()
+        }
+    }
+
+    private fun latestLocalCoverAccessMs(context: Context): Long {
+        return runCatching {
+            context.contentResolver.query(
+                metadataUri,
+                arrayOf("lastAccess"),
+                null,
+                null,
+                "lastAccess DESC"
+            )?.use { c ->
+                if (c.moveToFirst()) normalizeEpochMs(readColString(c, "lastAccess")?.toLongOrNull() ?: 0L) else 0L
+            } ?: 0L
+        }.getOrDefault(0L)
+    }
+
+    private fun normalizeEpochMs(value: Long): Long {
+        return when {
+            value <= 0L -> 0L
+            value < 10_000_000_000L -> value * 1000L
+            else -> value
         }
     }
 

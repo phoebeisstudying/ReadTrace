@@ -59,7 +59,8 @@ object WeReadClient {
         val coverUrl: String,
         val cachePath: String,
         val bytes: Long,
-        val fromCache: Boolean
+        val fromCache: Boolean,
+        val readUpdateTimeMs: Long = 0L
     )
 
     data class WallpaperBook(
@@ -255,9 +256,10 @@ object WeReadClient {
             val title = book.optString("title", "未知书籍").ifBlank { "未知书籍" }
             val author = book.optString("author", "未知作者").ifBlank { "未知作者" }
             val rawCoverUrl = book.optString("cover", "").trim()
+            val readUpdateTimeMs = normalizeEpochMs(book.optLong("readUpdateTime", 0L))
             AutoRefreshLog.i(
                 context,
-                "WeRead cover latest selected title=$title author=$author bookId=$bookId readUpdateTime=${book.optLong("readUpdateTime", 0L)}"
+                "WeRead cover latest selected title=$title author=$author bookId=$bookId readUpdateTime=${book.optLong("readUpdateTime", 0L)} readUpdateTimeMs=$readUpdateTimeMs"
             )
             val coverUrl = normalizeUrl(rawCoverUrl)
             if (bookId.isBlank() || coverUrl.isBlank()) {
@@ -272,7 +274,7 @@ object WeReadClient {
                 val detail = "缓存命中：$title / $author，${file.length()} bytes"
                 AutoRefreshLog.i(context, "WeRead cover cache hit title=$title bookId=$bookId path=${file.absolutePath} bytes=${file.length()}")
                 saveLatestCoverState(context, bookId, title, author, coverUrl, file.absolutePath, file.length())
-                return CoverCacheResult(true, "缓存命中", detail, bookId, title, author, coverUrl, file.absolutePath, file.length(), true)
+                return CoverCacheResult(true, "缓存命中", detail, bookId, title, author, coverUrl, file.absolutePath, file.length(), true, readUpdateTimeMs)
             }
             for (candidate in candidates) {
                 val bytes = runCatching { httpGetBytes(candidate) }
@@ -283,13 +285,13 @@ object WeReadClient {
                 val detail = "已缓存：$title / $author，${bytes.size} bytes"
                 AutoRefreshLog.i(context, "WeRead cover cached title=$title bookId=$bookId path=${file.absolutePath} bytes=${bytes.size} url=${candidate.take(120)}")
                 saveLatestCoverState(context, bookId, title, author, candidate, file.absolutePath, bytes.size.toLong())
-                return CoverCacheResult(true, "缓存成功", detail, bookId, title, author, candidate, file.absolutePath, bytes.size.toLong(), false)
+                return CoverCacheResult(true, "缓存成功", detail, bookId, title, author, candidate, file.absolutePath, bytes.size.toLong(), false, readUpdateTimeMs)
             }
             if (file.exists() && file.length() > 0L) {
                 val detail = "高清封面拉取失败，沿用旧缓存：$title / $author，${file.length()} bytes"
                 AutoRefreshLog.i(context, "WeRead cover fallback old cache title=$title bookId=$bookId path=${file.absolutePath} bytes=${file.length()}")
                 saveLatestCoverState(context, bookId, title, author, coverUrl, file.absolutePath, file.length())
-                return CoverCacheResult(true, "缓存命中", detail, bookId, title, author, coverUrl, file.absolutePath, file.length(), true)
+                return CoverCacheResult(true, "缓存命中", detail, bookId, title, author, coverUrl, file.absolutePath, file.length(), true, readUpdateTimeMs)
             }
             CoverCacheResult(false, "缓存失败", "所有封面候选地址都无法下载", bookId, title, author, coverUrl, "", 0L, false)
         } catch (e: Exception) {
@@ -342,6 +344,14 @@ object WeReadClient {
             .putString(KEY_LAST_COVER_PATH, cachePath)
             .putLong(KEY_LAST_COVER_BYTES, bytes)
             .apply()
+    }
+
+    private fun normalizeEpochMs(value: Long): Long {
+        return when {
+            value <= 0L -> 0L
+            value < 10_000_000_000L -> value * 1000L
+            else -> value
+        }
     }
 
     fun fetchWallpaperStats(context: Context, apiKey: String, mode: String, baseTimeSeconds: Long? = null): WallpaperStatsResult {
