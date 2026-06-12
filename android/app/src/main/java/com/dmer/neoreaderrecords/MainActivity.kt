@@ -68,6 +68,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var showChartCheck: CheckBox
     private lateinit var showProgressStatusCheck: CheckBox
     private lateinit var showAuthorCheck: CheckBox
+    private lateinit var showBookDurationCheck: CheckBox
     private lateinit var minDurationInput: EditText
     private lateinit var topNInput: EditText
     private lateinit var titleInput: EditText
@@ -101,6 +102,9 @@ class MainActivity : ComponentActivity() {
     private lateinit var autoModeHintText: TextView
     private lateinit var autoStateText: TextView
     private lateinit var updateStatusText: TextView
+    private lateinit var wereadApiKeyInput: EditText
+    private lateinit var wereadStatsModeGroup: RadioGroup
+    private lateinit var wereadStatusText: TextView
     private lateinit var pickFontDirBtn: Button
     private lateinit var titleFontSpinner: Spinner
     private lateinit var bodyFontSpinner: Spinner
@@ -129,6 +133,10 @@ class MainActivity : ComponentActivity() {
     private var metadataRowsDebugReport: String = ""
     private var uiDebugReport: String = ""
     private var isCheckingUpdates: Boolean = false
+    private var isTestingWeRead: Boolean = false
+    private var lastWeReadStatsDebug: String = ""
+    private var lastWeReadCoverDebug: String = ""
+    private var lastWeReadWallpaperDebug: String = ""
     private val debugLogName = "neoreader_debug_log.txt"
     private var selectedFontDirUri: String? = null
 
@@ -151,7 +159,7 @@ class MainActivity : ComponentActivity() {
 
     data class BookItem(val title: String, val author: String?, val progress: String?, val status: Int, val path: String?)
 
-    enum class DataSourceMode { DURATION, PATH_SESSION, METADATA_ACCESS }
+    enum class DataSourceMode { DURATION, PATH_SESSION, METADATA_ACCESS, WEREAD, MIXED }
     enum class PeriodMode { TODAY, YESTERDAY, THIS_WEEK, LAST_WEEK, LAST_7_DAYS, LAST_30_DAYS, CUSTOM }
     enum class ReadingFilterMode { ALL, READING_ONLY, FINISHED_ONLY }
     enum class ChartStyleMode { LINE, BAR }
@@ -162,6 +170,7 @@ class MainActivity : ComponentActivity() {
         val showChart: Boolean,
         val showProgressStatus: Boolean,
         val showAuthor: Boolean,
+        val showBookDuration: Boolean,
         val minDurationMinutes: Int,
         val topN: Int,
         val weekStartYmd: String,
@@ -416,7 +425,7 @@ class MainActivity : ComponentActivity() {
         ).joinToString(", ")
     }
 
-    private fun detectBooxDevicePreset(): String {
+    private fun detectBooxDevicePresetOrNull(): String? {
         val raw = listOf(
             android.os.Build.MANUFACTURER,
             android.os.Build.BRAND,
@@ -446,8 +455,12 @@ class MainActivity : ComponentActivity() {
             raw.contains("NOTE") && raw.contains("AIR") && raw.contains("3") && raw.contains("C") -> "NOTE_AIR3C"
             raw.contains("NOTE") && raw.contains("AIR") && raw.contains("3") -> "NOTE_AIR3"
             raw.contains("PAGE") -> "PAGE"
-            else -> BooxDevicePresets.DEFAULT_KEY
+            else -> null
         }
+    }
+
+    private fun detectBooxDevicePreset(): String {
+        return detectBooxDevicePresetOrNull() ?: BooxDevicePresets.DEFAULT_KEY
     }
 
     private fun booxPresetKeyByRadioId(id: Int): String {
@@ -817,6 +830,21 @@ class MainActivity : ComponentActivity() {
             return row
         }
 
+        fun bindSecretEditRow(label: String, target: EditText): LinearLayout {
+            fun masked(): String = WeReadClient.maskKey(target.text.toString()) + " ▼"
+            val (row, value) = bindInputRow(label, { masked() }) {
+                openTextEditDialog(label, target)
+            }
+            target.addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    value.text = masked()
+                }
+                override fun afterTextChanged(s: Editable?) {}
+            })
+            return row
+        }
+
         fun bindSpinnerRow(label: String, spinner: Spinner): LinearLayout {
             lateinit var value: TextView
             val (row, valueView) = bindInputRow(label, {
@@ -885,17 +913,22 @@ class MainActivity : ComponentActivity() {
         val savedPeriod = prefs.getString("period_mode", PeriodMode.THIS_WEEK.name) ?: PeriodMode.THIS_WEEK.name
         periodGroup = makeRadioGroup(periodOptions, selectedId(savedPeriod, 4001, periodOptions, periodNames))
 
-        val sourceOptions = listOf(1001 to "按阅读时长事件（推荐）\n优先统计真实阅读分钟数", 1002 to "按有路径会话\n有打开记录就算一本", 1003 to "按Metadata最近访问\n按书库最近打开排序")
-        val sourceNames = listOf(DataSourceMode.DURATION.name, DataSourceMode.PATH_SESSION.name, DataSourceMode.METADATA_ACCESS.name)
+        val sourceOptions = listOf(
+            1001 to "Neo 阅读器\n读取文石本地阅读记录",
+            1004 to "微信读书\n联网读取微信统计与封面",
+            1005 to "混合来源\n合并本地和微信数据"
+        )
+        val sourceNames = listOf(DataSourceMode.DURATION.name, DataSourceMode.WEREAD.name, DataSourceMode.MIXED.name)
         sourceGroup = makeRadioGroup(sourceOptions, selectedId(prefs.getString("source_mode", DataSourceMode.DURATION.name) ?: DataSourceMode.DURATION.name, 1001, sourceOptions, sourceNames))
 
-        val wallpaperOptions = listOf(1201 to "统计壁纸\n生成阅读账单图片", 1202 to "当前阅读封面\n尝试用最近书籍封面", 1203 to "自动封面优先\n有封面用封面，否则用账单")
+        val wallpaperOptions = listOf(1201 to "统计壁纸\n生成阅读账单图片", 1202 to "当前阅读封面\n使用当前来源的最近封面", 1203 to "自动封面优先\n有封面用封面，否则用账单")
         val wallpaperNames = listOf("STATS", "COVER", "AUTO_COVER")
         wallpaperModeGroup = makeRadioGroup(wallpaperOptions, selectedId(prefs.getString("wallpaper_mode", "STATS") ?: "STATS", 1201, wallpaperOptions, wallpaperNames))
 
-        val detectedBooxPreset = detectBooxDevicePreset()
+        val matchedBooxPreset = detectBooxDevicePresetOrNull()
+        val detectedBooxPreset = matchedBooxPreset ?: BooxDevicePresets.DEFAULT_KEY
         val booxDevicePresetOptions = BooxDevicePresets.all.mapIndexed { index, preset ->
-            val matchMark = if (preset.key == detectedBooxPreset) " [本机匹配]" else ""
+            val matchMark = if (matchedBooxPreset != null && preset.key == matchedBooxPreset) " [本机匹配]" else ""
             (1301 + index) to "${preset.label}$matchMark\n${preset.inchText} ${preset.heightPx}x${preset.widthPx}"
         }
         val booxDevicePresetNames = BooxDevicePresets.all.map { it.key }
@@ -905,7 +938,7 @@ class MainActivity : ComponentActivity() {
         } else {
             detectedBooxPreset
         }
-        appendUiDebug("booxDevicePreset default=$defaultBooxDevicePreset hasSaved=${prefs.contains("boox_device_preset")} userSet=$hasManualBooxPreset device=${deviceIdentityText()}")
+        appendUiDebug("booxDevicePreset default=$defaultBooxDevicePreset matched=${matchedBooxPreset ?: "none"} hasSaved=${prefs.contains("boox_device_preset")} userSet=$hasManualBooxPreset device=${deviceIdentityText()}")
         booxDevicePresetGroup = makeRadioGroup(
             booxDevicePresetOptions,
             selectedId(
@@ -968,6 +1001,7 @@ class MainActivity : ComponentActivity() {
         includeUnreadCheck = makeCheck(prefs.getBoolean("include_unread", false))
         showProgressStatusCheck = makeCheck(prefs.getBoolean("show_progress_status", true))
         showAuthorCheck = makeCheck(prefs.getBoolean("show_author", true))
+        showBookDurationCheck = makeCheck(prefs.getBoolean("show_book_duration", true))
         showChartCheck = makeCheck(prefs.getBoolean("show_chart", true))
         showPeakLabelCheck = makeCheck(prefs.getBoolean("show_peak_label", true))
         autoRefreshCheck = makeCheck(prefs.getBoolean(AutoRefreshConfig.KEY_AUTO_ENABLED, true))
@@ -988,15 +1022,16 @@ class MainActivity : ComponentActivity() {
 
         root.addView(hiddenHost)
 
-        addSectionTitle("数据与统计", "周期、数据口径、时长单位与日期范围")
+        addSectionTitle("数据与统计", "周期、数据来源、设备尺寸与时长单位")
         val booxDevicePresetRow = bindRadioChoiceRow("阅读器尺寸预设", booxDevicePresetGroup, booxDevicePresetOptions)
         appendUiDebug("buildSettingsPage added booxDevicePresetRow rootChildCount=${root.childCount} rowChildren=${booxDevicePresetRow.childCount}")
-        addHint("说明：这里只保存阅读器和屏幕尺寸选择；暂时不影响生成图片。默认 Leaf5。")
+        addHint("说明：首次会根据本机型号自动匹配；匹配不到时默认 Leaf5。这个选项会影响预览和生成壁纸的图片分辨率。")
         val periodSegment = bindSegmented("统计周期", periodGroup, periodOptions, isVertical = false)
         addHint("说明：选择账单统计哪一段时间；自定义模式会显示起止日期选择。")
-        val sourceSegment = bindSegmented("数据口径", sourceGroup, sourceOptions, isVertical = true)
+        val sourceSegment = bindSegmented("数据来源", sourceGroup, sourceOptions, isVertical = true)
+        addHint("说明：Neo 阅读器读取文石本地数据库，适合离线使用；微信读书需要联网读取 API；混合来源会把本地和微信的统计时长相加，书单按阅读时长合并排序，封面按最近阅读来源选择，失败时回退另一来源。混合来源包含联网数据，因此自动模式下不会在熄屏瞬间请求网络，而是在解锁后刷新，通常下一次锁屏看到新图；如果微信读书读取失败，会继续使用本地数据。")
         val wallpaperModeSegment = bindSegmented("壁纸类型", wallpaperModeGroup, wallpaperOptions, isVertical = true)
-        val wallpaperModeHint = addHint("说明：统计壁纸最稳定；封面模式只读取本地书籍封面，不访问网络。提示：封面模式依赖 NeoReader 元数据落库。通常需要先退出当前正在阅读的书籍再锁屏，才会刷新到最新封面；如果在书籍打开状态下直接锁屏，往往仍显示旧封面，通常下一次锁屏才会生效。")
+        val wallpaperModeHint = addHint("说明：统计壁纸生成阅读账单；当前阅读封面会按所选数据来源取最近书籍封面，Neo 阅读器只读本地封面，微信读书会联网获取并缓存封面；自动封面优先会先尝试封面，失败时回退到账单。提示：Neo 封面依赖本地元数据落库，通常退出当前书籍后再锁屏更容易刷新；微信封面在解锁后生成，通常下一次锁屏显示最新结果。")
         val coverFitSegment = bindSegmented("封面显示方式", coverFitModeGroup, coverFitOptions, isVertical = false)
         val timeUnitSegment = bindSegmented("时长显示单位", timeUnitGroup, timeUnitOptions, isVertical = false)
         addHint("说明：小时模式更适合壁纸阅读，分钟模式更适合精确核对。")
@@ -1029,6 +1064,8 @@ class MainActivity : ComponentActivity() {
         val progressSegment = bindSegmented("进度显示方式", progressModeGroup, progressOptions, isVertical = false)
         val authorRow = bindToggle("显示作者行（在进度行上方）", showAuthorCheck)
         addHint("说明：如果文石元数据里没有作者，会显示未知；关闭后可节省空间。")
+        val bookDurationRow = bindToggle("显示每本书籍阅读时长", showBookDurationCheck)
+        addHint("说明：打开后会在每本书的状态后追加“时长”；Neo 阅读器按本地阅读事件统计，微信读书按接口返回的阅读时长显示。")
         val titleFontRow = bindSpinnerRow("标题字体（系统字体）", titleFontSpinner)
         val bodyFontRow = bindSpinnerRow("正文字体（系统字体）", bodyFontSpinner)
         pickFontDirBtn = Button(this).apply {
@@ -1091,6 +1128,69 @@ class MainActivity : ComponentActivity() {
             root.addView(this)
         }
         val autoWarningText = addHint("提示：熄屏触发会增加唤醒次数与耗电；NeoReader 常在退出当前书籍/会话落库后才更新元数据，所以可能出现“本次锁屏仍是旧封面、下次锁屏生效”的现象。")
+
+        addSectionTitle("微信读书", "配置 API Key，支持手动生成与解锁预热刷新")
+        wereadApiKeyInput = makeInput(WeReadClient.loadApiKey(this))
+        val wereadKeyRow = bindSecretEditRow("API Key", wereadApiKeyInput)
+        val wereadStatsModeOptions = listOf(9001 to "本周\nweekly", 9002 to "本月\nmonthly", 9003 to "今年\nannually", 9004 to "总计\noverall")
+        val wereadStatsModeNames = listOf("weekly", "monthly", "annually", "overall")
+        wereadStatsModeGroup = makeRadioGroup(
+            wereadStatsModeOptions,
+            selectedId(
+                getSharedPreferences("weread_settings", Context.MODE_PRIVATE).getString("weread_stats_mode", "monthly") ?: "monthly",
+                9002,
+                wereadStatsModeOptions,
+                wereadStatsModeNames
+            ),
+            RadioGroup.HORIZONTAL
+        )
+        val wereadStatsModeSegment = bindSegmented("统计测试周期", wereadStatsModeGroup, wereadStatsModeOptions, isVertical = false)
+        wereadStatusText = TextView(this).apply {
+            textSize = 13f
+            setTextColor(Color.DKGRAY)
+            setPadding(0, 0, 0, 16)
+            root.addView(this)
+        }
+        val wereadButtons = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 0, 0, 24)
+        }
+        wereadButtons.addView(Button(this).apply {
+            text = "保存 Key"
+            setOnClickListener {
+                saveWeReadApiKeyFromUi()
+                renderWeReadState(WeReadClient.cachedState(this@MainActivity))
+                writeDebugLog("weread_key_saved")
+            }
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 12, 0) })
+        wereadButtons.addView(Button(this).apply {
+            text = "测试连接"
+            setOnClickListener { testWeReadConnection() }
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        root.addView(wereadButtons)
+        root.addView(Button(this).apply {
+            text = "读取统计测试"
+            setOnClickListener { testWeReadStats() }
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 0, 24) })
+        root.addView(Button(this).apply {
+            text = "缓存最近封面测试"
+            setOnClickListener { testWeReadCoverCache() }
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 0, 24) })
+        root.addView(Button(this).apply {
+            text = "清理所有封面缓存"
+            setOnClickListener { clearAllCoverCaches() }
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 0, 24) })
+        root.addView(Button(this).apply {
+            text = "预览微信账单测试"
+            setOnClickListener { previewWeReadWallpaper() }
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 0, 24) })
+        root.addView(Button(this).apply {
+            text = "生成微信账单测试"
+            setOnClickListener { generateWeReadWallpaper() }
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 0, 24) })
+        addHint("当前书识别：微信读书封面按 /shelf/sync 中 readUpdateTime 最新的书籍判断，不是直接读取微信读书正在显示的前台页面。刚切换书籍时微信同步可能有延迟，通常下一次解锁或手动刷新后会更新。")
+        addHint("说明：连接和最近封面会调用 /shelf/sync；统计壁纸会调用 /readdata/detail；封面会缓存到 App 私有目录。选择“数据来源=微信读书”后，手动预览/生成会立即联网；自动模式下不在熄屏时联网，而是在解锁后预热刷新，网络未恢复会短间隔重试，成功后覆盖保存到 Pictures/NeoReader/neoreader_wallpaper.png。Key 只保存在本机 App 配置中，日志只记录脱敏后的 Key。")
+        renderWeReadState(WeReadClient.cachedState(this))
 
         addSectionTitle("版本与更新", "GitHub Release 分发与更新检查")
         updateStatusText = TextView(this).apply {
@@ -1192,6 +1292,9 @@ class MainActivity : ComponentActivity() {
             if (!isInitializingUi) applySettingsPreview()
         }
         showAuthorCheck.setOnCheckedChangeListener { _, _ ->
+            if (!isInitializingUi) applySettingsPreview()
+        }
+        showBookDurationCheck.setOnCheckedChangeListener { _, _ ->
             if (!isInitializingUi) applySettingsPreview()
         }
         showPeakLabelCheck.setOnCheckedChangeListener { _, _ ->
@@ -1306,6 +1409,15 @@ class MainActivity : ComponentActivity() {
         val settings = readSettingsFromUi()
         saveSettings(settings)
         saveAndApplyAutoRefreshSettings()
+        if (settings.sourceMode == DataSourceMode.WEREAD || settings.sourceMode == DataSourceMode.MIXED) {
+            previewPresetText = BooxDevicePresets.byKey(settings.booxDevicePreset).displayText()
+            val label = if (settings.sourceMode == DataSourceMode.MIXED) "混合来源" else "微信读书来源"
+            statusText.text = "$label 已保存\n请点击“刷新预览”或“生成壁纸”获取最新内容。"
+            changeStateText.text = "状态: $label 参数已变更（未联网）｜尺寸: $previewPresetText"
+            refreshPreview()
+            writeDebugLog(if (settings.sourceMode == DataSourceMode.MIXED) "mixed_source_settings_saved" else "weread_source_settings_saved")
+            return
+        }
         val (bmp, result) = renderWallpaperPreview(settings)
         previewBitmap = bmp
         previewPresetText = BooxDevicePresets.byKey(settings.booxDevicePreset).displayText()
@@ -1372,6 +1484,10 @@ class MainActivity : ComponentActivity() {
 
     private fun generateAndSaveFromCurrentSettings() {
         val settings = readSettingsFromUi()
+        if (settings.sourceMode == DataSourceMode.WEREAD || settings.sourceMode == DataSourceMode.MIXED) {
+            generateWeReadWallpaper()
+            return
+        }
         saveSettings(settings)
         saveAndApplyAutoRefreshSettings()
         val (bmp, result) = renderWallpaperPreview(settings)
@@ -1430,6 +1546,7 @@ class MainActivity : ComponentActivity() {
         val lastReason = when (lastReasonRaw) {
             "screen_off" -> "熄屏触发"
             "screen_on_prewarm" -> "亮屏预热"
+            "user_present_prewarm" -> "解锁预热"
             "book_content_changed" -> "内容变化"
             "daily_alarm" -> "每日定时"
             "" -> "暂无"
@@ -1453,6 +1570,249 @@ class MainActivity : ComponentActivity() {
     private fun updateReleaseStatusFromCache() {
         if (!::updateStatusText.isInitialized) return
         renderReleaseState(GitHubReleaseChecker.cachedState(this))
+    }
+
+    private fun saveWeReadApiKeyFromUi() {
+        if (!::wereadApiKeyInput.isInitialized) return
+        WeReadClient.saveApiKey(this, wereadApiKeyInput.text.toString())
+        appendUiDebug("weread api key saved key=${WeReadClient.maskKey(wereadApiKeyInput.text.toString())}")
+    }
+
+    private fun clearAllCoverCaches() {
+        val targets = listOf(
+            File(cacheDir, "extracted_covers"),
+            File(cacheDir, "covers")
+        )
+        var fileCount = 0
+        var byteCount = 0L
+        targets.forEach { dir ->
+            if (dir.exists()) {
+                dir.walkTopDown()
+                    .filter { it.isFile }
+                    .forEach {
+                        fileCount += 1
+                        byteCount += it.length()
+                    }
+                dir.deleteRecursively()
+            }
+        }
+        WeReadClient.clearCoverCacheState(this)
+        val message = "已清理封面缓存：${fileCount}个文件，${formatBytes(byteCount)}"
+        AutoRefreshLog.i(this, "cover cache cleared files=$fileCount bytes=$byteCount")
+        appendUiDebug("cover cache cleared files=$fileCount bytes=$byteCount")
+        if (::statusText.isInitialized) statusText.text = message
+        if (::wereadStatusText.isInitialized) {
+            wereadStatusText.text = "${wereadStatusText.text}\n$message"
+        }
+        writeDebugLog("cover_cache_cleared")
+    }
+
+    private fun formatBytes(bytes: Long): String {
+        return when {
+            bytes >= 1024L * 1024L -> String.format(Locale.US, "%.1f MB", bytes / 1024f / 1024f)
+            bytes >= 1024L -> String.format(Locale.US, "%.1f KB", bytes / 1024f)
+            else -> "${bytes} B"
+        }
+    }
+
+    private fun testWeReadConnection() {
+        if (isTestingWeRead) return
+        saveWeReadApiKeyFromUi()
+        isTestingWeRead = true
+        if (::wereadStatusText.isInitialized) {
+            wereadStatusText.text = "微信读书：正在测试连接..."
+        }
+        Thread {
+            val result = WeReadClient.testConnection(applicationContext, WeReadClient.loadApiKey(applicationContext))
+            runOnUiThread {
+                isTestingWeRead = false
+                renderWeReadState(WeReadClient.cachedState(this))
+                if (::wereadStatusText.isInitialized) {
+                    wereadStatusText.text = "${wereadStatusText.text}\n本次结果：${result.detail.take(160)}"
+                }
+                appendUiDebug("weread test ok=${result.ok} detail=${result.detail.take(120)}")
+                writeDebugLog("weread_test")
+            }
+        }.start()
+    }
+
+    private fun selectedWeReadStatsMode(): String {
+        return when (if (::wereadStatsModeGroup.isInitialized) wereadStatsModeGroup.checkedRadioButtonId else 9002) {
+            9001 -> "weekly"
+            9003 -> "annually"
+            9004 -> "overall"
+            else -> "monthly"
+        }
+    }
+
+    private fun saveWeReadStatsModeFromUi(): String {
+        val mode = selectedWeReadStatsMode()
+        getSharedPreferences("weread_settings", Context.MODE_PRIVATE)
+            .edit()
+            .putString("weread_stats_mode", mode)
+            .apply()
+        return mode
+    }
+
+    private fun weReadPeriodLabel(periodMode: PeriodMode): String {
+        return when (periodMode) {
+            PeriodMode.TODAY -> "当天"
+            PeriodMode.YESTERDAY -> "昨天"
+            PeriodMode.THIS_WEEK -> "本周"
+            PeriodMode.LAST_WEEK -> "上周"
+            PeriodMode.LAST_7_DAYS -> "最近7天"
+            PeriodMode.LAST_30_DAYS -> "最近30天"
+            PeriodMode.CUSTOM -> "自定义周期"
+        }
+    }
+
+    private fun testWeReadStats() {
+        if (isTestingWeRead) return
+        saveWeReadApiKeyFromUi()
+        val mode = saveWeReadStatsModeFromUi()
+        isTestingWeRead = true
+        if (::wereadStatusText.isInitialized) {
+            wereadStatusText.text = "微信读书：正在读取${WeReadClient.modeLabel(mode)}统计..."
+        }
+        Thread {
+            val result = WeReadClient.fetchReadStats(applicationContext, WeReadClient.loadApiKey(applicationContext), mode)
+            runOnUiThread {
+                isTestingWeRead = false
+                lastWeReadStatsDebug = "ok=${result.ok}, mode=${result.mode}, totalSeconds=${result.totalReadSeconds}, dayAverageSeconds=${result.dayAverageSeconds}, readDays=${result.readDays}, top=${result.topBooks.joinToString("|")}, detail=${result.detail}"
+                renderWeReadState(WeReadClient.cachedState(this))
+                if (::wereadStatusText.isInitialized) {
+                    wereadStatusText.text = "${wereadStatusText.text}\n统计结果：${result.detail.take(260)}"
+                }
+                appendUiDebug("weread stats $lastWeReadStatsDebug")
+                writeDebugLog("weread_stats_test")
+            }
+        }.start()
+    }
+
+    private fun testWeReadCoverCache() {
+        if (isTestingWeRead) return
+        saveWeReadApiKeyFromUi()
+        isTestingWeRead = true
+        if (::wereadStatusText.isInitialized) {
+            wereadStatusText.text = "微信读书：正在缓存最近阅读封面..."
+        }
+        Thread {
+            val result = WeReadClient.cacheLatestCover(applicationContext, WeReadClient.loadApiKey(applicationContext))
+            runOnUiThread {
+                isTestingWeRead = false
+                lastWeReadCoverDebug = "ok=${result.ok}, status=${result.status}, title=${result.title}, author=${result.author}, bookId=${result.bookId}, bytes=${result.bytes}, fromCache=${result.fromCache}, path=${result.cachePath}, detail=${result.detail}"
+                renderWeReadState(WeReadClient.cachedState(this))
+                if (::wereadStatusText.isInitialized) {
+                    wereadStatusText.text = "${wereadStatusText.text}\n封面结果：${result.detail.take(220)}"
+                }
+                appendUiDebug("weread cover $lastWeReadCoverDebug")
+                writeDebugLog("weread_cover_cache_test")
+            }
+        }.start()
+    }
+
+    private fun previewWeReadWallpaper() {
+        if (isTestingWeRead) return
+        saveWeReadApiKeyFromUi()
+        val settings = readSettingsFromUi()
+        saveSettings(settings)
+        val periodLabel = weReadPeriodLabel(settings.periodMode)
+        val sourceLabel = if (settings.sourceMode == DataSourceMode.MIXED) "混合来源" else "微信读书"
+        isTestingWeRead = true
+        changeStateText.text = "状态: 正在生成${sourceLabel}预览..."
+        if (::wereadStatusText.isInitialized) {
+            wereadStatusText.text = "$sourceLabel：正在生成${periodLabel}预览..."
+        }
+        Thread {
+            val preview = buildSourcePreviewForWallpaperMode(settings)
+            runOnUiThread {
+                isTestingWeRead = false
+                if (preview != null) {
+                    previewBitmap = preview.bitmap
+                    previewPresetText = BooxDevicePresets.byKey(readSettingsFromUi().booxDevicePreset).displayText()
+                    statusText.text = "${sourceLabel}预览已更新（未写入文件）\n${preview.summary}"
+                    changeStateText.text = "状态: ${sourceLabel}预览已更新｜尺寸: $previewPresetText"
+                    lastWeReadWallpaperDebug = "ok=true, period=$periodLabel, summary=${preview.summary}"
+                    refreshPreview()
+                    showPreviewPage()
+                } else {
+                    changeStateText.text = "状态: ${sourceLabel}预览失败"
+                    lastWeReadWallpaperDebug = "ok=false, period=$periodLabel"
+                }
+                if (::wereadStatusText.isInitialized) {
+                    wereadStatusText.text = "${wereadStatusText.text}\n账单预览：${lastWeReadWallpaperDebug.take(180)}"
+                }
+                appendUiDebug("weread wallpaper $lastWeReadWallpaperDebug")
+                writeDebugLog("weread_wallpaper_preview")
+            }
+        }.start()
+    }
+
+    private fun generateWeReadWallpaper() {
+        if (isTestingWeRead) return
+        saveWeReadApiKeyFromUi()
+        val settings = readSettingsFromUi()
+        saveSettings(settings)
+        val periodLabel = weReadPeriodLabel(settings.periodMode)
+        val sourceLabel = if (settings.sourceMode == DataSourceMode.MIXED) "混合来源" else "微信读书"
+        isTestingWeRead = true
+        changeStateText.text = "状态: 正在生成${sourceLabel}壁纸..."
+        if (::wereadStatusText.isInitialized) {
+            wereadStatusText.text = "$sourceLabel：正在生成并保存${periodLabel}壁纸..."
+        }
+        Thread {
+            val preview = buildSourcePreviewForWallpaperMode(settings)
+            runOnUiThread {
+                isTestingWeRead = false
+                if (preview != null) {
+                    val saved = saveBitmapToPictures(preview.bitmap)
+                    previewBitmap = preview.bitmap
+                    lastSavedPath = saved
+                    previewPresetText = BooxDevicePresets.byKey(readSettingsFromUi().booxDevicePreset).displayText()
+                    statusText.text = "${sourceLabel}壁纸已生成并覆盖文件\n${preview.summary}\n路径: $saved"
+                    changeStateText.text = "状态: ${sourceLabel}壁纸已生成并保存｜尺寸: $previewPresetText"
+                    lastWeReadWallpaperDebug = "ok=true, period=$periodLabel, saved=$saved, summary=${preview.summary}"
+                    refreshPreview()
+                    showPreviewPage()
+                } else {
+                    changeStateText.text = "状态: ${sourceLabel}生成失败"
+                    lastWeReadWallpaperDebug = "ok=false, period=$periodLabel, saved=<none>"
+                }
+                if (::wereadStatusText.isInitialized) {
+                    wereadStatusText.text = "${wereadStatusText.text}\n账单生成：${lastWeReadWallpaperDebug.take(180)}"
+                }
+                appendUiDebug("weread wallpaper generated $lastWeReadWallpaperDebug")
+                writeDebugLog("weread_wallpaper_generated")
+            }
+        }.start()
+    }
+
+    private fun buildWeReadPreviewForWallpaperMode(wallpaperMode: String): AutoWallpaperGenerator.PreviewResult? {
+        return when (wallpaperMode) {
+            "COVER" -> AutoWallpaperGenerator.buildWeReadCoverPreviewFromPrefs(applicationContext, "W")
+            "AUTO_COVER" -> AutoWallpaperGenerator.buildWeReadCoverPreviewFromPrefs(applicationContext, "W")
+                ?: AutoWallpaperGenerator.buildWeReadStatsPreviewFromPrefs(applicationContext, "W")
+            else -> AutoWallpaperGenerator.buildWeReadStatsPreviewFromPrefs(applicationContext, "W")
+        }
+    }
+
+    private fun buildSourcePreviewForWallpaperMode(settings: Settings): AutoWallpaperGenerator.PreviewResult? {
+        return if (settings.sourceMode == DataSourceMode.MIXED) {
+            AutoWallpaperGenerator.buildMixedPreviewFromPrefs(applicationContext, "A")
+        } else {
+            buildWeReadPreviewForWallpaperMode(settings.wallpaperMode)
+        }
+    }
+
+    private fun renderWeReadState(state: WeReadClient.State) {
+        if (!::wereadStatusText.isInitialized) return
+        val checkedAt = if (state.lastTestMs > 0L) {
+            SimpleDateFormat("MM-dd HH:mm", Locale.US).format(Date(state.lastTestMs))
+        } else {
+            "尚未测试"
+        }
+        val error = if (state.error.isBlank()) "" else "\n失败原因：${state.error.take(120)}"
+        wereadStatusText.text = "微信读书 Key：${state.maskedKey}\n连接状态：${state.status}\n最近测试：$checkedAt$error"
     }
 
     private fun checkForUpdatesIfNeeded(force: Boolean) {
@@ -1538,6 +1898,13 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun refreshPreviewData() {
+        val settings = readSettingsFromUi()
+        if (settings.sourceMode == DataSourceMode.WEREAD || settings.sourceMode == DataSourceMode.MIXED) {
+            previewWeReadWallpaper()
+            collectMetadataDebugSample()
+            showPreviewPage()
+            return
+        }
         applySettingsPreview()
         collectMetadataDebugSample()
         writeDebugLog("manual_refresh_preview")
@@ -1607,6 +1974,7 @@ class MainActivity : ComponentActivity() {
         val showChart = showChartCheck.isChecked
         val showProgressStatus = showProgressStatusCheck.isChecked
         val showAuthor = showAuthorCheck.isChecked
+        val showBookDuration = showBookDurationCheck.isChecked
         val minDurationMinutes = minDurationInput.text.toString().trim().toIntOrNull()?.coerceAtLeast(0) ?: 1
         val topN = topNInput.text.toString().trim().toIntOrNull()?.coerceIn(1, 5) ?: 5
         val weekStart = selectedWeekStartYmd.ifBlank { currentWeekStartYmd() }
@@ -1628,6 +1996,8 @@ class MainActivity : ComponentActivity() {
         val sourceMode = when (sourceGroup.checkedRadioButtonId) {
             1002 -> DataSourceMode.PATH_SESSION
             1003 -> DataSourceMode.METADATA_ACCESS
+            1004 -> DataSourceMode.WEREAD
+            1005 -> DataSourceMode.MIXED
             else -> DataSourceMode.DURATION
         }
         val wallpaperMode = when (wallpaperModeGroup.checkedRadioButtonId) {
@@ -1687,7 +2057,7 @@ class MainActivity : ComponentActivity() {
         }
         val titleFont = fontSpec(titleFontSpinner.selectedItem?.toString() ?: "SERIF_BOLD")
         val bodyFont = fontSpec(bodyFontSpinner.selectedItem?.toString() ?: "MONO")
-        return Settings(includeUnread, showChart, showProgressStatus, showAuthor, minDurationMinutes, topN, weekStart, weekEnd, periodMode, readingFilterMode, sourceMode, wallpaperMode, coverFitMode, progressMode, timeUnit, receiptTitle, receiptTitleSize, receiptBodySize, serialNumberMode, serialNumberCustom, serialNumberSize, booxDevicePreset, footerMode, barcodeWidthScale, barcodeGapMode, noteText, chartStyleMode, showPeakLabel, yAxisMode, yAxisFixedMaxMinutes, titleFont, bodyFont)
+        return Settings(includeUnread, showChart, showProgressStatus, showAuthor, showBookDuration, minDurationMinutes, topN, weekStart, weekEnd, periodMode, readingFilterMode, sourceMode, wallpaperMode, coverFitMode, progressMode, timeUnit, receiptTitle, receiptTitleSize, receiptBodySize, serialNumberMode, serialNumberCustom, serialNumberSize, booxDevicePreset, footerMode, barcodeWidthScale, barcodeGapMode, noteText, chartStyleMode, showPeakLabel, yAxisMode, yAxisFixedMaxMinutes, titleFont, bodyFont)
     }
 
     private fun saveSettings(settings: Settings) {
@@ -1697,6 +2067,7 @@ class MainActivity : ComponentActivity() {
             .putBoolean("show_chart", settings.showChart)
             .putBoolean("show_progress_status", settings.showProgressStatus)
             .putBoolean("show_author", settings.showAuthor)
+            .putBoolean("show_book_duration", settings.showBookDuration)
             .putInt("min_duration_minutes", settings.minDurationMinutes)
             .putInt("top_n", settings.topN)
             .putString("week_start", settings.weekStartYmd)
@@ -1850,10 +2221,17 @@ class MainActivity : ComponentActivity() {
 
     private fun dumpTextTree(view: View, maxItems: Int = 80): String {
         val out = mutableListOf<String>()
+        fun redactSecrets(text: String): String {
+            return Regex("""wrk-[A-Za-z0-9_=-]{8,}""").replace(text) { match ->
+                WeReadClient.maskKey(match.value)
+            }
+        }
         fun walk(v: View, depth: Int) {
             if (out.size >= maxItems) return
             if (v is TextView) {
-                val text = v.text?.toString()?.replace('\n', '|')?.take(120).orEmpty()
+                val text = redactSecrets(v.text?.toString().orEmpty())
+                    .replace('\n', '|')
+                    .take(120)
                 if (text.isNotBlank()) {
                     out += "${"  ".repeat(depth)}${v.javaClass.simpleName}:$text visibility=${v.visibility}"
                 }
@@ -1878,6 +2256,15 @@ class MainActivity : ComponentActivity() {
                 w.append("time=").append(now).append('\n')
                 w.append("deviceIdentity=").append(deviceIdentityText()).append('\n')
                 w.append("detectedBooxDevicePreset=").append(detectBooxDevicePreset()).append('\n')
+                val wereadState = WeReadClient.cachedState(this)
+                w.append("weread=").append("key=").append(wereadState.maskedKey)
+                    .append(", status=").append(wereadState.status)
+                    .append(", lastTestMs=").append(wereadState.lastTestMs.toString())
+                    .append(", error=").append(wereadState.error)
+                    .append('\n')
+                w.append("lastWeReadStats=").append(lastWeReadStatsDebug.ifBlank { "<empty>" }).append('\n')
+                w.append("lastWeReadCover=").append(lastWeReadCoverDebug.ifBlank { "<empty>" }).append('\n')
+                w.append("lastWeReadWallpaper=").append(lastWeReadWallpaperDebug.ifBlank { "<empty>" }).append('\n')
                 w.append("currentPageKey=").append(currentPageKey).append('\n')
                 if (::settingsPage.isInitialized) {
                     w.append("settingsPageVisibility=").append(settingsPage.visibility.toString()).append('\n')
@@ -1888,6 +2275,7 @@ class MainActivity : ComponentActivity() {
                     .append(", showChart=").append(s.showChart.toString())
                     .append(", showProgressStatus=").append(s.showProgressStatus.toString())
                     .append(", showAuthor=").append(s.showAuthor.toString())
+                    .append(", showBookDuration=").append(s.showBookDuration.toString())
                     .append(", minDuration=").append(s.minDurationMinutes.toString())
                     .append(", topN=").append(s.topN.toString())
                     .append(", sourceMode=").append(s.sourceMode.name)

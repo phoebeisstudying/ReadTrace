@@ -32,8 +32,28 @@ object AutoWallpaperGenerator {
     private val statsUri = Uri.parse("content://com.onyx.kreader.statistics.provider/OnyxStatisticsModel")
     private const val DAY_MS = 86_400_000L
 
-    private data class BookItem(val title: String, val author: String?, val progress: String?, val status: Int)
+    private data class BookItem(
+        val title: String,
+        val author: String?,
+        val progress: String?,
+        val status: Int,
+        val progressText: String? = null,
+        val durationText: String? = null
+    )
+    private data class MetadataBook(
+        val path: String,
+        val lastAccessMs: Long,
+        val item: BookItem
+    )
     private data class ChartStats(val totalMs: Long, val points: LongArray, val labels: List<String>)
+    private data class WeReadBuildData(
+        val rangeStart: Long,
+        val rangeEnd: Long,
+        val chart: ChartStats,
+        val books: List<BookItem>,
+        val label: String,
+        val note: String
+    )
     private enum class BucketMode { HOUR, DAY, WEEK, MONTH }
 
     private data class AutoSettings(
@@ -41,6 +61,7 @@ object AutoWallpaperGenerator {
         val showChart: Boolean,
         val showProgressStatus: Boolean,
         val showAuthor: Boolean,
+        val showBookDuration: Boolean,
         val minDurationMinutes: Int,
         val topN: Int,
         val periodMode: String,
@@ -97,8 +118,198 @@ object AutoWallpaperGenerator {
         }
     }
 
+    fun generateAndSaveWeRead(context: Context, reason: String): Boolean {
+        AutoRefreshLog.i(context, "WeRead auto generator start reason=$reason")
+        return runCatching {
+            val s = readSettings(context)
+            val built = buildWeReadPreviewForWallpaperMode(context, s.wallpaperMode) ?: return false
+            if ((reason.startsWith("screen_on_prewarm") || reason.startsWith("user_present_prewarm")) &&
+                built.summary.contains("source=fallback_cache")
+            ) {
+                AutoRefreshLog.i(context, "WeRead auto skip saving fallback cache and request retry ${built.summary}")
+                return false
+            }
+            val path = saveBitmap(context, built.bitmap)
+            AutoRefreshLog.i(context, "WeRead auto saved path=$path ${built.summary}")
+            true
+        }.getOrElse {
+            AutoRefreshLog.e(context, "WeRead auto generator exception", it)
+            false
+        }
+    }
+
+    fun generateAndSaveMixed(context: Context, reason: String): Boolean {
+        AutoRefreshLog.i(context, "Mixed auto generator start reason=$reason")
+        return runCatching {
+            val built = buildMixedPreviewFromPrefs(context, "A") ?: return false
+            if ((reason.startsWith("screen_on_prewarm") || reason.startsWith("user_present_prewarm")) &&
+                built.summary.contains("source=fallback_cache")
+            ) {
+                AutoRefreshLog.i(context, "Mixed auto skip saving fallback cache and request retry ${built.summary}")
+                return false
+            }
+            val path = saveBitmap(context, built.bitmap)
+            AutoRefreshLog.i(context, "Mixed auto saved path=$path ${built.summary}")
+            true
+        }.getOrElse {
+            AutoRefreshLog.e(context, "Mixed auto generator exception", it)
+            false
+        }
+    }
+
     fun buildPreviewFromPrefs(context: Context, sourceMark: String = "M"): PreviewResult? {
         return runCatching { buildPreviewInternal(context, sourceMark, false) }.getOrNull()
+    }
+
+    fun buildWeReadStatsPreviewFromPrefs(context: Context, sourceMark: String = "W"): PreviewResult? {
+        return runCatching {
+            val s = readSettings(context)
+            val data = buildWeReadStatsForSettings(context, s)
+            if (data == null) {
+                AutoRefreshLog.i(context, "WeRead wallpaper preview failed: no range data")
+                return@runCatching null
+            }
+            val bmp = draw(context, data.rangeStart, data.rangeEnd, data.chart, data.books, s, sourceMark)
+            val summary = buildString {
+                append("微信读书 ")
+                append(data.label)
+                append(", 书籍=").append(data.books.size)
+                append(", 时长=").append(formatDuration(data.chart.totalMs, s.timeUnit))
+                append(", 输出=").append(canvasSizeText(s))
+                if (data.note.isNotBlank()) append(", ").append(data.note)
+            }
+            PreviewResult(bmp, summary)
+        }.getOrNull()
+    }
+
+    fun buildWeReadCoverPreviewFromPrefs(context: Context, sourceMark: String = "W"): PreviewResult? {
+        return runCatching {
+            val s = readSettings(context)
+            val fetched = WeReadClient.cacheLatestCover(context, WeReadClient.loadApiKey(context))
+            var usedFallbackCache = false
+            val cover = if (fetched.ok) {
+                fetched
+            } else {
+                val cached = WeReadClient.cachedLatestCover(context)
+                if (cached != null) {
+                    usedFallbackCache = true
+                    AutoRefreshLog.i(context, "WeRead cover wallpaper fallback cached detail=${fetched.detail.take(120)}")
+                    cached
+                } else {
+                    AutoRefreshLog.i(context, "WeRead cover wallpaper failed ${fetched.detail}")
+                    return@runCatching null
+                }
+            }
+            val bmp = BitmapFactory.decodeFile(cover.cachePath)
+            if (bmp == null) {
+                AutoRefreshLog.i(context, "WeRead cover wallpaper decode failed path=${cover.cachePath}")
+                return@runCatching null
+            }
+            val rendered = renderCoverWallpaper(context, bmp, cover.title, sourceMark, s)
+            val summary = buildString {
+                append("微信读书封面 title=").append(cover.title)
+                append(", author=").append(cover.author)
+                append(", source=").append(
+                    when {
+                        usedFallbackCache -> "fallback_cache"
+                        cover.fromCache -> "cache"
+                        else -> "network"
+                    }
+                )
+                append(", fit=").append(s.coverFitMode)
+                append(", 输出=").append(canvasSizeText(s))
+            }
+            PreviewResult(rendered, summary)
+        }.getOrNull()
+    }
+
+    fun buildMixedPreviewFromPrefs(context: Context, sourceMark: String = "A"): PreviewResult? {
+        return runCatching {
+            val s = readSettings(context)
+            val tryCover = s.wallpaperMode == "COVER" || s.wallpaperMode == "AUTO_COVER"
+            if (tryCover) {
+                buildMixedCoverPreview(context, s, sourceMark)?.let {
+                    return@runCatching it
+                }
+                if (s.wallpaperMode == "COVER") return@runCatching null
+            }
+
+            val data = buildMixedStatsForSettings(context, s) ?: return@runCatching null
+            val bmp = draw(context, data.rangeStart, data.rangeEnd, data.chart, data.books, s, sourceMark)
+            PreviewResult(
+                bmp,
+                "混合统计 范围=${fmt(data.rangeStart)}~${fmt(data.rangeEnd)}, 书籍=${data.books.size}, 时长=${formatDuration(data.chart.totalMs, s.timeUnit)}, ${data.note}, 输出=${canvasSizeText(s)}"
+            )
+        }.getOrNull()
+    }
+
+    private fun buildWeReadPreviewForWallpaperMode(context: Context, wallpaperMode: String): PreviewResult? {
+        return when (wallpaperMode) {
+            "COVER" -> buildWeReadCoverPreviewFromPrefs(context, "W")
+            "AUTO_COVER" -> buildWeReadCoverPreviewFromPrefs(context, "W")
+                ?: buildWeReadStatsPreviewFromPrefs(context, "W")
+            else -> buildWeReadStatsPreviewFromPrefs(context, "W")
+        }
+    }
+
+    private fun buildMixedCoverPreview(context: Context, s: AutoSettings, sourceMark: String): PreviewResult? {
+        val localLatestMs = latestLocalCoverAccessMs(context)
+        val fetchedWeRead = WeReadClient.cacheLatestCover(context, WeReadClient.loadApiKey(context))
+        val weReadLatestMs = if (fetchedWeRead.ok) fetchedWeRead.readUpdateTimeMs else 0L
+        val weReadFirst = weReadLatestMs >= localLatestMs
+        AutoRefreshLog.i(
+            context,
+            "Mixed cover choose weReadFirst=$weReadFirst localLatestMs=$localLatestMs weReadLatestMs=$weReadLatestMs weReadOk=${fetchedWeRead.ok}"
+        )
+
+        fun renderWeReadFromFetched(): PreviewResult? {
+            if (!fetchedWeRead.ok) return null
+            val bmp = BitmapFactory.decodeFile(fetchedWeRead.cachePath) ?: return null
+            val rendered = renderCoverWallpaper(context, bmp, fetchedWeRead.title, sourceMark, s)
+            val source = if (fetchedWeRead.fromCache) "cache" else "network"
+            return PreviewResult(
+                rendered,
+                "混合封面：微信最新 title=${fetchedWeRead.title}, author=${fetchedWeRead.author}, source=$source, readUpdateTimeMs=$weReadLatestMs, localLatestMs=$localLatestMs, 输出=${canvasSizeText(s)}"
+            )
+        }
+
+        fun renderLocal(): PreviewResult? {
+            return tryBuildCoverWallpaper(context, s.copy(sourceMode = "DURATION"), sourceMark)
+                ?.let {
+                    PreviewResult(
+                        it.bitmap,
+                        "混合封面：本地最新 ${it.summary}, localLatestMs=$localLatestMs, weReadLatestMs=$weReadLatestMs"
+                    )
+                }
+        }
+
+        return if (weReadFirst) {
+            renderWeReadFromFetched() ?: renderLocal()
+        } else {
+            renderLocal() ?: renderWeReadFromFetched()
+        }
+    }
+
+    private fun latestLocalCoverAccessMs(context: Context): Long {
+        return runCatching {
+            context.contentResolver.query(
+                metadataUri,
+                arrayOf("lastAccess"),
+                null,
+                null,
+                "lastAccess DESC"
+            )?.use { c ->
+                if (c.moveToFirst()) normalizeEpochMs(readColString(c, "lastAccess")?.toLongOrNull() ?: 0L) else 0L
+            } ?: 0L
+        }.getOrDefault(0L)
+    }
+
+    private fun normalizeEpochMs(value: Long): Long {
+        return when {
+            value <= 0L -> 0L
+            value < 10_000_000_000L -> value * 1000L
+            else -> value
+        }
     }
 
     private fun buildPreviewInternal(context: Context, sourceMark: String, fromAutoWorker: Boolean): PreviewResult? {
@@ -110,8 +321,18 @@ object AutoWallpaperGenerator {
             if (s.wallpaperMode == "COVER") return null
         }
         val range = resolvePeriodRange(s) ?: return null
-        val books = queryTopBooks(context.contentResolver, range.first, range.second, s.topN, s.includeUnread, s.readingFilterMode)
+        val books = if (s.sourceMode == "DURATION") {
+            queryTopBooksByDuration(context, range.first, range.second, s)
+                .take(s.topN)
+                .map { it.first }
+        } else {
+            queryTopBooks(context.contentResolver, range.first, range.second, s.topN, s.includeUnread, s.readingFilterMode)
+        }
         val stats = queryStatsByMode(context.contentResolver, range.first, range.second, s)
+        AutoRefreshLog.i(
+            context,
+            "Local stats books source=${s.sourceMode} books=${books.size} withDuration=${books.count { !it.durationText.isNullOrBlank() }}"
+        )
         val bmp = draw(context, range.first, range.second, stats, books, s, sourceMark)
         val summary = buildString {
             append("范围=").append(fmt(range.first)).append("~").append(fmt(range.second))
@@ -128,6 +349,353 @@ object AutoWallpaperGenerator {
     private fun canvasSizeText(s: AutoSettings): String {
         val preset = BooxDevicePresets.byKey(s.booxDevicePreset)
         return "${preset.label} ${preset.widthPx}x${preset.heightPx}"
+    }
+
+    private fun buildWeReadStatsForSettings(context: Context, s: AutoSettings): WeReadBuildData? {
+        val range = resolvePeriodRange(s) ?: return null
+        val monthStarts = monthStartsBetween(range.first, range.second)
+        if (monthStarts.isEmpty()) return null
+        if (monthStarts.size > 24) {
+            AutoRefreshLog.i(context, "WeRead range too large months=${monthStarts.size} period=${s.periodMode}")
+            return null
+        }
+
+        val key = WeReadClient.loadApiKey(context)
+        val bucketMap = linkedMapOf<Long, Long>()
+        val bookMap = linkedMapOf<String, WeReadClient.WallpaperBook>()
+        monthStarts.forEach { monthStart ->
+            val stats = WeReadClient.fetchWallpaperStats(context, key, "monthly", monthStart / 1000L)
+            if (!stats.ok) {
+                AutoRefreshLog.i(context, "WeRead range fetch failed period=${s.periodMode} month=${fmt(monthStart)} detail=${stats.detail}")
+                return null
+            }
+            stats.buckets.forEach { (bucketSec, seconds) ->
+                val bucketStart = startOfDayMs(bucketSec * 1000L)
+                if (bucketStart in range.first..range.second) {
+                    bucketMap[bucketStart] = (bucketMap[bucketStart] ?: 0L) + seconds
+                }
+            }
+            stats.books.forEach { book ->
+                val id = "${book.title.trim()}|${book.author.trim()}"
+                val old = bookMap[id]
+                bookMap[id] = if (old == null) {
+                    book
+                } else {
+                    old.copy(readSeconds = old.readSeconds + book.readSeconds)
+                }
+            }
+        }
+
+        val sortedBuckets = bucketMap.toSortedMap()
+        val values = sortedBuckets.values.map { it * 1000L }.toLongArray()
+        val labels = sortedBuckets.keys.map { SimpleDateFormat("MM-dd", Locale.US).format(Date(it)) }
+        val totalMs = values.sum()
+        val chart = ChartStats(
+            totalMs = totalMs,
+            points = if (values.isNotEmpty()) values else longArrayOf(0L),
+            labels = if (labels.isNotEmpty()) labels else listOf(weReadPeriodLabel(s.periodMode))
+        )
+        val books = bookMap.values
+            .sortedByDescending { it.readSeconds }
+            .take(s.topN)
+            .map { toWeReadBookItem(context, key, it) }
+        val note = if (monthStarts.size > 1 || s.periodMode != "LAST_30_DAYS") {
+            "时长按日分桶精确过滤，书单按覆盖月份排行合并"
+        } else {
+            "时长按日分桶过滤"
+        }
+        AutoRefreshLog.i(context, "WeRead range stats period=${s.periodMode} range=${fmt(range.first)}~${fmt(range.second)} months=${monthStarts.size} buckets=${sortedBuckets.size} totalSec=${totalMs / 1000L} books=${books.size}")
+        return WeReadBuildData(range.first, range.second, chart, books, weReadPeriodLabel(s.periodMode), note)
+    }
+
+    private fun buildMixedStatsForSettings(context: Context, s: AutoSettings): WeReadBuildData? {
+        val range = resolvePeriodRange(s) ?: return null
+        val localEvents = collectDurationEvents(context.contentResolver, range.first, range.second, s.minDurationMinutes)
+        val weReadEvents = mutableListOf<Pair<Long, Long>>()
+        val weReadBookScores = linkedMapOf<String, Pair<WeReadClient.WallpaperBook, Long>>()
+        val monthStarts = monthStartsBetween(range.first, range.second)
+        val key = WeReadClient.loadApiKey(context)
+        val weReadFailures = mutableListOf<String>()
+        monthStarts.forEach { monthStart ->
+            val stats = WeReadClient.fetchWallpaperStats(context, key, "monthly", monthStart / 1000L)
+            if (!stats.ok) {
+                AutoRefreshLog.i(context, "Mixed WeRead fetch failed month=${fmt(monthStart)} detail=${stats.detail}")
+                weReadFailures.add("${fmt(monthStart)} ${stats.detail.take(80)}")
+                return@forEach
+            }
+            stats.buckets.forEach { (bucketSec, seconds) ->
+                val bucketStart = startOfDayMs(bucketSec * 1000L)
+                if (bucketStart in range.first..range.second) {
+                    weReadEvents.add(bucketStart to seconds * 1000L)
+                }
+            }
+            stats.books.forEach { book ->
+                val id = "${book.title.trim()}|${book.author.trim()}"
+                val old = weReadBookScores[id]
+                val newMs = book.readSeconds * 1000L
+                weReadBookScores[id] = if (old == null) {
+                    book to newMs
+                } else {
+                    old.first.copy(readSeconds = old.first.readSeconds + book.readSeconds) to (old.second + newMs)
+                }
+            }
+        }
+
+        val chart = bucketize(localEvents + weReadEvents, range.first, range.second, chooseBucketMode(s, range.first, range.second))
+        val localBooks = queryTopBooksByDuration(context, range.first, range.second, s)
+            .map { it.first to it.second }
+        val weReadBooks = weReadBookScores.values.map { (book, scoreMs) ->
+            toWeReadBookItem(context, key, book).copy(durationText = formatDuration(scoreMs, s.timeUnit)) to scoreMs
+        }
+        val mergedBooks = mergeScoredBooks(localBooks + weReadBooks, s.topN, s.timeUnit)
+        val note = buildString {
+            append("本地+微信，图表按时间相加，书单按阅读时长合并排序")
+            if (weReadFailures.isNotEmpty()) {
+                append("；微信读书读取失败，已使用本地数据")
+                if (weReadEvents.isNotEmpty() || weReadBooks.isNotEmpty()) append("和已读取到的微信数据")
+            }
+        }
+        AutoRefreshLog.i(
+            context,
+            "Mixed stats range=${fmt(range.first)}~${fmt(range.second)} localEvents=${localEvents.size} weReadEvents=${weReadEvents.size} localBooks=${localBooks.size} weReadBooks=${weReadBooks.size} mergedBooks=${mergedBooks.size} weReadFailures=${weReadFailures.size} totalMs=${chart.totalMs}"
+        )
+        return WeReadBuildData(range.first, range.second, chart, mergedBooks, "混合", note)
+    }
+
+    private fun queryTopBooksByDuration(
+        context: Context,
+        start: Long,
+        end: Long,
+        s: AutoSettings
+    ): List<Pair<BookItem, Long>> {
+        val resolver = context.contentResolver
+        val durationByPath = linkedMapOf<String, Long>()
+        val orphanEvents = mutableListOf<Pair<Long, Long>>()
+        val minMs = s.minDurationMinutes * 60_000L
+        var statsRows = 0
+        var statsRowsWithPath = 0
+        resolver.query(
+            statsUri,
+            arrayOf("path", "eventTime", "durationTime"),
+            "eventTime >= ? AND eventTime <= ? AND durationTime IS NOT NULL AND durationTime != '' AND durationTime != '0'",
+            arrayOf(start.toString(), end.toString()),
+            null
+        )?.use { c ->
+            while (c.moveToNext()) {
+                statsRows += 1
+                val path = c.getString(c.getColumnIndexOrThrow("path")).orEmpty()
+                val event = c.getString(c.getColumnIndexOrThrow("eventTime"))?.toLongOrNull() ?: 0L
+                val dur = c.getString(c.getColumnIndexOrThrow("durationTime"))?.toLongOrNull() ?: 0L
+                if (dur < minMs) continue
+                if (path.isBlank()) {
+                    if (event > 0L) orphanEvents.add(normalizeEpochMs(event) to dur)
+                } else {
+                    statsRowsWithPath += 1
+                    durationByPath[path] = (durationByPath[path] ?: 0L) + dur
+                }
+            }
+        }
+
+        val metadata = linkedMapOf<String, MetadataBook>()
+        resolver.query(
+            metadataUri,
+            arrayOf("nativeAbsolutePath", "title", "authors", "progress", "readingStatus", "lastAccess"),
+            null,
+            null,
+            null
+        )?.use { c ->
+            while (c.moveToNext()) {
+                val path = c.getString(c.getColumnIndexOrThrow("nativeAbsolutePath")).orEmpty()
+                if (path.isBlank()) continue
+                val status = c.getString(c.getColumnIndexOrThrow("readingStatus"))?.toIntOrNull() ?: 0
+                if (!s.includeUnread && status == 0) continue
+                if (s.readingFilterMode == "READING_ONLY" && status != 1) continue
+                if (s.readingFilterMode == "FINISHED_ONLY" && status != 2) continue
+                metadata[path] = MetadataBook(
+                    path = path,
+                    lastAccessMs = normalizeEpochMs(c.getString(c.getColumnIndexOrThrow("lastAccess"))?.toLongOrNull() ?: 0L),
+                    item = BookItem(
+                        c.getString(c.getColumnIndexOrThrow("title")) ?: File(path).nameWithoutExtension,
+                        c.getString(c.getColumnIndexOrThrow("authors")),
+                        c.getString(c.getColumnIndexOrThrow("progress")),
+                        status
+                    )
+                )
+            }
+        }
+
+        var timeMatched = 0
+        var timeUnmatched = 0
+        if (orphanEvents.isNotEmpty() && metadata.isNotEmpty()) {
+            val candidates = metadata.values
+                .filter { it.lastAccessMs > 0L }
+                .ifEmpty { metadata.values.toList() }
+            val maxDelta = when {
+                end - start <= DAY_MS -> 12L * 60L * 60L * 1000L
+                end - start <= 8L * DAY_MS -> 3L * DAY_MS
+                else -> 10L * DAY_MS
+            }
+            orphanEvents.forEach { (eventMs, dur) ->
+                val best = candidates.minByOrNull {
+                    val access = if (it.lastAccessMs > 0L) it.lastAccessMs else start
+                    kotlin.math.abs(access - eventMs)
+                }
+                val bestAccess = best?.lastAccessMs ?: 0L
+                val delta = if (best != null && bestAccess > 0L) kotlin.math.abs(bestAccess - eventMs) else Long.MAX_VALUE
+                if (best != null && delta <= maxDelta) {
+                    durationByPath[best.path] = (durationByPath[best.path] ?: 0L) + dur
+                    timeMatched += 1
+                } else {
+                    timeUnmatched += 1
+                }
+            }
+        }
+
+        AutoRefreshLog.i(context, "Local duration book match rows=$statsRows rowsWithPath=$statsRowsWithPath orphan=${orphanEvents.size} timeMatched=$timeMatched timeUnmatched=$timeUnmatched metadata=${metadata.size} durationBooks=${durationByPath.size}")
+
+        if (durationByPath.isEmpty()) return queryTopBooks(
+            resolver,
+            start,
+            end,
+            s.topN,
+            s.includeUnread,
+            s.readingFilterMode
+        ).mapIndexed { idx, item -> item to ((s.topN - idx).coerceAtLeast(1) * 60_000L).toLong() }
+
+        return durationByPath.mapNotNull { (path, ms) ->
+            val item = metadata[path]?.item ?: BookItem(File(path).nameWithoutExtension, null, null, 1)
+            item.copy(durationText = formatDuration(ms, s.timeUnit)) to ms
+        }.sortedByDescending { it.second }
+    }
+
+    private fun toWeReadBookItem(context: Context, apiKey: String, book: WeReadClient.WallpaperBook): BookItem {
+        val progress = if (book.bookId.isNotBlank()) {
+            WeReadClient.fetchBookProgress(context, apiKey, book.bookId)
+        } else {
+            null
+        }
+        val progressValue = progress?.progressPercent
+        val progressText = progressValue?.let { "${it.coerceIn(0, 100)}%" }
+        val status = when {
+            progressValue != null && progressValue >= 100 -> 2
+            progressValue != null && progressValue > 0 -> 1
+            book.readSeconds > 0L -> 1
+            else -> 0
+        }
+        val durationSeconds = progress?.recordReadingSeconds?.takeIf { it > 0L } ?: book.readSeconds
+        return BookItem(
+            title = book.title,
+            author = book.author,
+            progress = null,
+            status = status,
+            progressText = progressText,
+            durationText = WeReadClient.formatSeconds(durationSeconds)
+        )
+    }
+
+    private fun mergeScoredBooks(items: List<Pair<BookItem, Long>>, limit: Int, unit: String): List<BookItem> {
+        val merged = linkedMapOf<String, Pair<BookItem, Long>>()
+        items.forEach { (book, score) ->
+            val key = "${book.title.trim()}|${book.author.orEmpty().trim()}"
+            val old = merged[key]
+            merged[key] = if (old == null) {
+                book to score
+            } else {
+                val total = old.second + score
+                val base = if (old.first.progressText.isNullOrBlank() && !book.progressText.isNullOrBlank()) book else old.first
+                base.copy(durationText = formatDuration(total, unit)) to total
+            }
+        }
+        return merged.values
+            .sortedByDescending { it.second }
+            .take(limit)
+            .map { it.first }
+    }
+
+    private fun weReadPeriodLabel(periodMode: String): String {
+        return when (periodMode) {
+            "TODAY" -> "当天"
+            "YESTERDAY" -> "昨天"
+            "THIS_WEEK" -> "本周"
+            "LAST_WEEK" -> "上周"
+            "LAST_7_DAYS" -> "最近7天"
+            "LAST_30_DAYS" -> "最近30天"
+            "CUSTOM" -> "自定义周期"
+            else -> periodMode
+        }
+    }
+
+    private fun monthStartsBetween(startMs: Long, endMs: Long): List<Long> {
+        val out = mutableListOf<Long>()
+        val cal = Calendar.getInstance(TimeZone.getDefault())
+        cal.timeInMillis = startMs
+        cal.set(Calendar.DAY_OF_MONTH, 1)
+        cal.set(Calendar.HOUR_OF_DAY, 0)
+        cal.set(Calendar.MINUTE, 0)
+        cal.set(Calendar.SECOND, 0)
+        cal.set(Calendar.MILLISECOND, 0)
+        while (cal.timeInMillis <= endMs) {
+            out.add(cal.timeInMillis)
+            cal.add(Calendar.MONTH, 1)
+        }
+        return out
+    }
+
+    private fun startOfDayMs(ms: Long): Long {
+        val cal = Calendar.getInstance(TimeZone.getDefault())
+        cal.timeInMillis = ms
+        cal.set(Calendar.HOUR_OF_DAY, 0)
+        cal.set(Calendar.MINUTE, 0)
+        cal.set(Calendar.SECOND, 0)
+        cal.set(Calendar.MILLISECOND, 0)
+        return cal.timeInMillis
+    }
+
+    private fun weReadRange(stats: WeReadClient.WallpaperStatsResult): Pair<Long, Long> {
+        val now = System.currentTimeMillis()
+        val baseMs = stats.baseTimeSeconds * 1000L
+        if (stats.mode == "overall") {
+            val first = stats.buckets.firstOrNull()?.first?.times(1000L) ?: now
+            return first to now
+        }
+        if (baseMs <= 0L) return now to now
+        val cal = Calendar.getInstance(TimeZone.getDefault())
+        cal.timeInMillis = baseMs
+        val start = cal.timeInMillis
+        when (stats.mode) {
+            "weekly" -> cal.add(Calendar.DAY_OF_MONTH, 6)
+            "monthly" -> {
+                cal.add(Calendar.MONTH, 1)
+                cal.add(Calendar.DAY_OF_MONTH, -1)
+            }
+            "annually" -> {
+                cal.add(Calendar.YEAR, 1)
+                cal.add(Calendar.DAY_OF_MONTH, -1)
+            }
+            else -> cal.add(Calendar.DAY_OF_MONTH, 0)
+        }
+        cal.set(Calendar.HOUR_OF_DAY, 23)
+        cal.set(Calendar.MINUTE, 59)
+        cal.set(Calendar.SECOND, 59)
+        cal.set(Calendar.MILLISECOND, 999)
+        return start to minOf(cal.timeInMillis, now)
+    }
+
+    private fun weReadChartStats(stats: WeReadClient.WallpaperStatsResult, mode: String): ChartStats {
+        if (stats.buckets.isEmpty()) {
+            return ChartStats(stats.totalReadSeconds * 1000L, longArrayOf(stats.totalReadSeconds * 1000L), listOf(WeReadClient.modeLabel(mode)))
+        }
+        val values = stats.buckets.map { it.second * 1000L }.toLongArray()
+        val labels = stats.buckets.map { (seconds, _) ->
+            val d = Date(seconds * 1000L)
+            when (mode) {
+                "annually" -> SimpleDateFormat("MM月", Locale.US).format(d)
+                "overall" -> SimpleDateFormat("yyyy", Locale.US).format(d)
+                else -> SimpleDateFormat("MM-dd", Locale.US).format(d)
+            }
+        }
+        val total = if (stats.totalReadSeconds > 0L) stats.totalReadSeconds * 1000L else values.sum()
+        return ChartStats(total, values, labels)
     }
 
     private fun tryBuildCoverWallpaper(context: Context, s: AutoSettings, sourceMark: String): PreviewResult? {
@@ -424,6 +992,7 @@ object AutoWallpaperGenerator {
             showChart = p.getBoolean("show_chart", true),
             showProgressStatus = p.getBoolean("show_progress_status", true),
             showAuthor = p.getBoolean("show_author", true),
+            showBookDuration = p.getBoolean("show_book_duration", true),
             minDurationMinutes = p.getInt("min_duration_minutes", 1).coerceAtLeast(0),
             topN = p.getInt("top_n", 5).coerceIn(1, 5),
             periodMode = p.getString("period_mode", "THIS_WEEK") ?: "THIS_WEEK",
@@ -529,7 +1098,9 @@ object AutoWallpaperGenerator {
             if (s0.showProgressStatus) {
                 y += s(50f)
                 val st = when (b.status) { 2 -> "已读完"; 1 -> "阅读中"; else -> "未读" }
-                c.drawText("进度:${formatProgress(b.progress, s0.progressMode)}  状态:$st", s(260f), y, mono)
+                val value = b.progressText ?: formatProgress(b.progress, s0.progressMode)
+                val duration = if (s0.showBookDuration && !b.durationText.isNullOrBlank()) "  时长:${b.durationText}" else ""
+                c.drawText("进度:$value  状态:$st$duration", s(260f), y, mono)
             }
         }
 
@@ -824,7 +1395,12 @@ object AutoWallpaperGenerator {
     }
 
     private fun drawSourceCornerMark(canvas: Canvas, w: Int, h: Int, sourceMark: String, gs: Float) {
-        val label = if (sourceMark.uppercase(Locale.US).startsWith("A")) "A" else "M"
+        val upper = sourceMark.uppercase(Locale.US)
+        val label = when {
+            upper.startsWith("A") -> "A"
+            upper.startsWith("W") -> "W"
+            else -> "M"
+        }
         val radius = (11f * gs).coerceAtLeast(9f)
         val cx = w - (26f * gs)
         val cy = h - (24f * gs)

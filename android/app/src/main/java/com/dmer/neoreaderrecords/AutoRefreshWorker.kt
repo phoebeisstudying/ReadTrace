@@ -20,23 +20,68 @@ class AutoRefreshWorker(context: Context, params: WorkerParameters) : Worker(con
         
         val prefs = applicationContext.getSharedPreferences(AutoRefreshConfig.PREFS_NAME, Context.MODE_PRIVATE)
         val wallpaperMode = prefs.getString("wallpaper_mode", "STATS") ?: "STATS"
+        val sourceMode = prefs.getString("source_mode", "DURATION") ?: "DURATION"
+        AutoRefreshLog.i(applicationContext, "Worker config sourceMode=$sourceMode wallpaperMode=$wallpaperMode")
         val now = System.currentTimeMillis()
         val minIntervalMinutes = AutoRefreshConfig.minIntervalMinutes(applicationContext)
         val lastMs = prefs.getLong(AutoRefreshConfig.KEY_LAST_TRIGGER_MS, 0L)
         val lastContentMs = prefs.getLong(AutoRefreshConfig.KEY_LAST_CONTENT_TRIGGER_MS, 0L)
         val lastBookKey = prefs.getString("auto_last_book_key", "") ?: ""
 
-        val decision = AutoRefreshPolicy.decide(
-            reason = reason,
-            wallpaperMode = wallpaperMode,
-            nowMs = now,
-            minIntervalMinutes = minIntervalMinutes,
-            lastTriggerMs = lastMs,
-            lastContentTriggerMs = lastContentMs,
-            lastBookKey = lastBookKey
-        ) { getLatestBookIdentifier(applicationContext) }
-        AutoRefreshLog.i(applicationContext, "Worker decision: ${decision.logReason}")
-        if (!decision.shouldGenerate) {
+        if (sourceMode == "WEREAD" || sourceMode == "MIXED") {
+            if (reason != "screen_on_prewarm" && reason != "user_present_prewarm") {
+                AutoRefreshLog.i(applicationContext, "Worker skip remote source=$sourceMode on reason=$reason")
+                return Result.success()
+            }
+            val wereadPrewarmMinMs = 5_000L
+            val wereadLastMs = prefs.getLong(AutoRefreshConfig.KEY_WEREAD_LAST_PREWARM_MS, 0L)
+            val wereadDelta = now - wereadLastMs
+            if (wereadDelta < wereadPrewarmMinMs) {
+                AutoRefreshLog.i(applicationContext, "Worker skip remote duplicate prewarm: source=$sourceMode reason=$reason delta=${wereadDelta}ms < $wereadPrewarmMinMs ms")
+                return Result.success()
+            }
+            AutoRefreshLog.i(applicationContext, "Worker remote prewarm accepted: source=$sourceMode reason=$reason delta=${wereadDelta}ms")
+            prefs.edit()
+                .putLong(AutoRefreshConfig.KEY_WEREAD_LAST_PREWARM_MS, now)
+                .apply()
+            val ok = runRemoteWithNetworkRetries(reason, sourceMode)
+            if (ok) {
+                prefs.edit()
+                    .putLong(AutoRefreshConfig.KEY_LAST_TRIGGER_MS, now)
+                    .putString(AutoRefreshConfig.KEY_LAST_REASON, reason)
+                    .apply()
+                AutoRefreshLog.i(applicationContext, "Worker success saved remote source=$sourceMode")
+                return Result.success()
+            }
+            AutoRefreshLog.i(applicationContext, "Worker remote failed -> retry source=$sourceMode")
+            return Result.retry()
+        }
+
+        var shouldGenerate = true
+        var latestBookKey = ""
+
+        if (wallpaperMode == "COVER") {
+            // 封面模式：基于最新阅读书籍标识进行防抖（书没变绝不生成，书变了无视时间立刻生成）
+            latestBookKey = getLatestBookIdentifier(applicationContext)
+            val lastBookKey = prefs.getString("auto_last_book_key", "") ?: ""
+            if (latestBookKey.isNotBlank() && latestBookKey == lastBookKey) {
+                AutoRefreshLog.i(applicationContext, "Worker skip: COVER mode book unchanged ($latestBookKey)")
+                shouldGenerate = false
+            } else {
+                AutoRefreshLog.i(applicationContext, "Worker force generation: book changed from [$lastBookKey] to [$latestBookKey]")
+                shouldGenerate = true
+            }
+        } else {
+            // 统计模式：基于配置的时间进行严格防抖
+            if (delta < minIntervalMs) {
+                AutoRefreshLog.i(applicationContext, "Worker skip by debounce: delta=${delta}ms < $minIntervalMs ms")
+                shouldGenerate = false
+            } else {
+                shouldGenerate = true
+            }
+        }
+
+        if (!shouldGenerate) {
             return Result.success()
         }
 
@@ -55,6 +100,32 @@ class AutoRefreshWorker(context: Context, params: WorkerParameters) : Worker(con
         }
         AutoRefreshLog.i(applicationContext, "Worker failed -> retry")
         return Result.retry()
+    }
+
+    private fun runRemoteWithNetworkRetries(reason: String, sourceMode: String): Boolean {
+        val maxAttempts = 5
+        val firstDelayMs = 3_500L
+        val retryDelayMs = 3_000L
+        for (attempt in 1..maxAttempts) {
+            val delayMs = if (attempt == 1) firstDelayMs else retryDelayMs
+            AutoRefreshLog.i(
+                applicationContext,
+                "Worker remote wait network settle ${delayMs}ms before request source=$sourceMode attempt=$attempt/$maxAttempts"
+            )
+            Thread.sleep(delayMs)
+            val taggedReason = "$reason#$attempt"
+            val ok = if (sourceMode == "MIXED") {
+                AutoWallpaperGenerator.generateAndSaveMixed(applicationContext, taggedReason)
+            } else {
+                AutoWallpaperGenerator.generateAndSaveWeRead(applicationContext, taggedReason)
+            }
+            if (ok) {
+                AutoRefreshLog.i(applicationContext, "Worker remote attempt success source=$sourceMode attempt=$attempt/$maxAttempts")
+                return true
+            }
+            AutoRefreshLog.i(applicationContext, "Worker remote attempt failed source=$sourceMode attempt=$attempt/$maxAttempts")
+        }
+        return false
     }
 
     private fun getLatestBookIdentifier(context: Context): String {
