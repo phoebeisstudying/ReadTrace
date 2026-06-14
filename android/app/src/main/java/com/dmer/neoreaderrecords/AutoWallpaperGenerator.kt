@@ -49,6 +49,7 @@ object AutoWallpaperGenerator {
         val title: String,
         val author: String?,
         val path: String,
+        val status: Int,
         val durationMs: Long,
         val bitmap: Bitmap?
     )
@@ -476,6 +477,7 @@ object AutoWallpaperGenerator {
                         title = meta?.item?.title ?: File(path).nameWithoutExtension.ifBlank { "未知书名" },
                         author = meta?.item?.author,
                         path = path,
+                        status = meta?.item?.status ?: 1,
                         durationMs = ms,
                         bitmap = loadCalendarCoverBitmap(context, path)
                     )
@@ -1254,9 +1256,15 @@ object AutoWallpaperGenerator {
         canvas.drawText(monthText, marginX, top + title.textSize, title)
         val coveredDays = data.cells.count { it.inMonth && it.books.isNotEmpty() }
         val totalDuration = data.cells.filter { it.inMonth }.sumOf { it.totalMs }
-        canvas.drawText("${coveredDays}天有封面", w - marginX, top + title.textSize * 0.62f, summaryPaint)
+        val uniqueBooks = data.cells
+            .filter { it.inMonth }
+            .flatMap { it.books }
+            .distinctBy { it.path.ifBlank { it.title } }
+        val averagePerActiveDay = if (coveredDays > 0) totalDuration / coveredDays else 0L
+        canvas.drawText("总时长 ${compactDuration(totalDuration)}", w - marginX, top + title.textSize * 0.46f, summaryPaint)
         summaryPaint.typeface = Typeface.create(bodyFace, Typeface.NORMAL)
-        canvas.drawText("${data.matchedRows}次记录 · ${compactDuration(totalDuration)}", w - marginX, top + title.textSize * 1.05f, summaryPaint)
+        canvas.drawText("日均 ${compactDuration(averagePerActiveDay)} · 读过${uniqueBooks.size}本", w - marginX, top + title.textSize * 0.82f, summaryPaint)
+        canvas.drawText("读完${uniqueBooks.count { it.status == 2 }}本 · ${data.matchedRows}次记录", w - marginX, top + title.textSize * 1.18f, summaryPaint)
 
         val gridTop = top + title.textSize + h * 0.035f
         val gridLeft = marginX
@@ -1292,15 +1300,19 @@ object AutoWallpaperGenerator {
                 if (cell.inMonth && cell.books.isNotEmpty()) {
                     val coverArea = RectF(
                         x0 + colW * 0.05f,
-                        y0 + rowH * 0.22f,
+                        y0 + rowH * 0.31f,
                         x0 + colW * 0.95f,
-                        y0 + rowH * 0.9f
+                        y0 + rowH * 0.91f
                     )
                     drawCalendarBookStack(canvas, coverArea, cell.books, bodyFace)
                     if (cell.totalMs > 0L) {
-                        smallPaint.color = muted
-                        smallPaint.textAlign = Paint.Align.RIGHT
-                        canvas.drawText(compactDuration(cell.totalMs), x0 + colW * 0.92f, y0 + rowH * 0.94f, smallPaint)
+                        drawCalendarOutlineDuration(
+                            canvas,
+                            compactDuration(cell.totalMs),
+                            x0 + colW * 0.92f,
+                            y0 + rowH * 0.88f,
+                            bodyFace
+                        )
                     }
                 } else if (cell.inMonth && cell.eventCount > 0) {
                     smallPaint.color = muted
@@ -1351,6 +1363,24 @@ object AutoWallpaperGenerator {
             }
             canvas.drawRect(rect, border)
         }
+    }
+
+    private fun drawCalendarOutlineDuration(canvas: Canvas, label: String, right: Float, baseline: Float, bodyFace: Typeface) {
+        val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.BLACK
+            textSize = 34f
+            typeface = Typeface.create(bodyFace, Typeface.BOLD)
+            textAlign = Paint.Align.RIGHT
+            style = Paint.Style.STROKE
+            strokeWidth = 5.2f
+        }
+        val fill = Paint(stroke).apply {
+            color = Color.WHITE
+            style = Paint.Style.FILL
+            strokeWidth = 0f
+        }
+        canvas.drawText(label, right, baseline, stroke)
+        canvas.drawText(label, right, baseline, fill)
     }
 
     private fun drawFittedBitmap(canvas: Canvas, bitmap: Bitmap, dst: RectF) {
