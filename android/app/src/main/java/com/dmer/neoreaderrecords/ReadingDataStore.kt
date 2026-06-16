@@ -105,4 +105,52 @@ object ReadingDataStore {
             }
         }.getOrDefault(0)
     }
+
+    fun queryDailyBooks(
+        context: Context,
+        source: String,
+        startDate: String,
+        endDate: String
+    ): List<DailyBookRecord> {
+        return runCatching {
+            val out = mutableListOf<DailyBookRecord>()
+            Helper(context.applicationContext).readableDatabase.use { db ->
+                db.query(
+                    TABLE_DAILY_BOOKS,
+                    arrayOf(
+                        "date", "source", "book_key", "title", "author", "cover_cache_path",
+                        "duration_ms", "progress", "status", "confidence", "last_seen_at"
+                    ),
+                    "source = ? AND date >= ? AND date <= ?",
+                    arrayOf(source, startDate, endDate),
+                    null,
+                    null,
+                    "date ASC, duration_ms DESC"
+                ).use { c ->
+                    while (c.moveToNext()) {
+                        out.add(
+                            DailyBookRecord(
+                                date = c.getString(0),
+                                source = c.getString(1),
+                                bookKey = c.getString(2),
+                                title = c.getString(3),
+                                author = if (c.isNull(4)) null else c.getString(4),
+                                coverCachePath = if (c.isNull(5)) null else c.getString(5),
+                                durationMs = c.getLong(6),
+                                progress = if (c.isNull(7)) null else c.getString(7),
+                                status = c.getInt(8),
+                                confidence = c.getString(9),
+                                lastSeenAt = c.getLong(10)
+                            )
+                        )
+                    }
+                }
+            }
+            AutoRefreshLog.i(context, "ReadingDataStore query source=$source range=$startDate~$endDate records=${out.size}")
+            out
+        }.getOrElse {
+            AutoRefreshLog.e(context, "ReadingDataStore query failed source=$source range=$startDate~$endDate", it)
+            emptyList()
+        }
+    }
 }

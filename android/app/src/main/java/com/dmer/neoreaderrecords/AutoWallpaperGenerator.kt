@@ -420,6 +420,27 @@ object AutoWallpaperGenerator {
         gridCal.add(Calendar.DAY_OF_MONTH, -mondayIndex)
         val gridStart = startOfDayMs(gridCal.timeInMillis)
 
+        val liveData = buildLiveNeoCalendarData(context, s, monthStart, monthEnd, weekRows, gridStart)
+        val storedData = buildStoredNeoCalendarData(context, s, monthStart, monthEnd, weekRows, gridStart)
+        if (storedData != null) {
+            AutoRefreshLog.i(
+                context,
+                "calendar wallpaper use data store month=${fmt(monthStart)} rows=${storedData.statsRows} daysWithBooks=${storedData.cells.count { it.inMonth && it.books.isNotEmpty() }}"
+            )
+            return storedData
+        }
+        AutoRefreshLog.i(context, "calendar wallpaper data store empty, fallback live month=${fmt(monthStart)}")
+        return liveData
+    }
+
+    private fun buildLiveNeoCalendarData(
+        context: Context,
+        s: AutoSettings,
+        monthStart: Long,
+        monthEnd: Long,
+        weekRows: Int,
+        gridStart: Long
+    ): CalendarBuildData? {
         val metadata = loadCalendarMetadata(context, s)
         val metadataByPath = metadata.associateBy { it.path }
         val candidates = metadata.filter { it.lastAccessMs > 0L }.ifEmpty { metadata }
@@ -498,6 +519,69 @@ object AutoWallpaperGenerator {
         )
         persistNeoCalendarEstimates(context, cells)
         return CalendarBuildData(monthStart, monthEnd, weekRows, cells, rows, matchedRows, unmatchedRows)
+    }
+
+    private fun buildStoredNeoCalendarData(
+        context: Context,
+        s: AutoSettings,
+        monthStart: Long,
+        monthEnd: Long,
+        weekRows: Int,
+        gridStart: Long
+    ): CalendarBuildData? {
+        val dateFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+        val startDate = dateFmt.format(Date(monthStart))
+        val endDate = dateFmt.format(Date(monthEnd))
+        val records = ReadingDataStore.queryDailyBooks(context, "NEO", startDate, endDate)
+            .filter { record ->
+                (s.includeUnread || record.status != 0) &&
+                    (s.readingFilterMode != "READING_ONLY" || record.status == 1) &&
+                    (s.readingFilterMode != "FINISHED_ONLY" || record.status == 2)
+            }
+        if (records.isEmpty()) return null
+        val grouped = records.groupBy { it.date }
+        val cells = (0 until weekRows * 7).map { index ->
+            val dayMs = gridStart + index * DAY_MS
+            val dc = Calendar.getInstance(TimeZone.getDefault()).apply { timeInMillis = dayMs }
+            val inMonth = dayMs in monthStart..monthEnd
+            val dayKey = dateFmt.format(Date(dayMs))
+            val dayRecords = grouped[dayKey].orEmpty()
+            val books = dayRecords
+                .sortedByDescending { it.durationMs }
+                .take(4)
+                .map { record ->
+                    CalendarCoverItem(
+                        title = record.title,
+                        author = record.author,
+                        path = record.bookKey,
+                        status = record.status,
+                        durationMs = record.durationMs,
+                        bitmap = loadCalendarStoredCoverBitmap(context, record)
+                    )
+                }
+            CalendarDayCell(
+                dayStartMs = dayMs,
+                dayOfMonth = dc.get(Calendar.DAY_OF_MONTH),
+                inMonth = inMonth,
+                totalMs = dayRecords.sumOf { it.durationMs },
+                eventCount = dayRecords.size,
+                unmatchedCount = 0,
+                books = books
+            )
+        }
+        AutoRefreshLog.i(
+            context,
+            "calendar wallpaper data source=db month=${fmt(monthStart)} records=${records.size} daysWithBooks=${cells.count { it.inMonth && it.books.isNotEmpty() }}"
+        )
+        return CalendarBuildData(monthStart, monthEnd, weekRows, cells, records.size, records.size, 0)
+    }
+
+    private fun loadCalendarStoredCoverBitmap(context: Context, record: ReadingDataStore.DailyBookRecord): Bitmap? {
+        val fromCache = record.coverCachePath
+            ?.takeIf { it.isNotBlank() }
+            ?.let { BitmapFactory.decodeFile(it) }
+        if (fromCache != null) return fromCache
+        return if (record.bookKey.startsWith("/")) loadCalendarCoverBitmap(context, record.bookKey) else null
     }
 
     private fun persistNeoCalendarEstimates(context: Context, cells: List<CalendarDayCell>) {
