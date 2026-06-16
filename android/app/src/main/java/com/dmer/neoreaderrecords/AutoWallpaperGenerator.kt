@@ -435,7 +435,7 @@ object AutoWallpaperGenerator {
     private fun buildLocalCalendarPreviewForSettings(context: Context, s: AutoSettings, sourceMark: String): PreviewResult? {
         val data = buildLocalCalendarData(context, s) ?: return null
         val bmp = drawCalendarWallpaper(context, data, s, sourceMark)
-        val monthLabel = SimpleDateFormat("yyyy.MM", Locale.US).format(Date(data.monthStartMs))
+        val monthLabel = calendarTitleLabel(data, s)
         val coveredDays = data.cells.count { it.inMonth && it.books.isNotEmpty() }
         return PreviewResult(
             bmp,
@@ -445,8 +445,7 @@ object AutoWallpaperGenerator {
 
     private fun buildLocalCalendarData(context: Context, s: AutoSettings): CalendarBuildData? {
         val baseRange = resolvePeriodRange(s)
-        val baseMs = baseRange?.second ?: System.currentTimeMillis()
-        val frame = calendarMonthFrame(baseMs)
+        val frame = calendarFrameForSettings(s, baseRange)
         val monthStart = frame.monthStart
         val monthEnd = frame.monthEnd
         val weekRows = frame.weekRows
@@ -463,6 +462,30 @@ object AutoWallpaperGenerator {
         }
         AutoRefreshLog.i(context, "calendar wallpaper data store empty, fallback live month=${fmt(monthStart)}")
         return liveData
+    }
+
+    private fun calendarFrameForSettings(s: AutoSettings, range: Pair<Long, Long>?): CalendarMonthFrame {
+        val safeRange = range ?: resolvePeriodRange(s)
+        return if (s.periodMode == "LAST_30_DAYS" && safeRange != null) {
+            rollingLast30CalendarFrame(safeRange.first, safeRange.second)
+        } else {
+            calendarMonthFrame(safeRange?.second ?: System.currentTimeMillis())
+        }
+    }
+
+    private fun rollingLast30CalendarFrame(rangeStart: Long, rangeEnd: Long): CalendarMonthFrame {
+        val endWeek = Calendar.getInstance(TimeZone.getDefault()).apply {
+            timeInMillis = rangeEnd
+            firstDayOfWeek = Calendar.MONDAY
+            set(Calendar.DAY_OF_WEEK, Calendar.MONDAY)
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }
+        endWeek.add(Calendar.DAY_OF_MONTH, -28)
+        val gridStart = startOfDayMs(endWeek.timeInMillis)
+        return CalendarMonthFrame(rangeStart, rangeEnd, 5, gridStart)
     }
 
     private fun calendarMonthFrame(baseMs: Long): CalendarMonthFrame {
@@ -1431,7 +1454,7 @@ object AutoWallpaperGenerator {
 
         val marginX = w * 0.055f
         val top = h * 0.034f
-        val monthText = SimpleDateFormat("M/yyyy", Locale.US).format(Date(data.monthStartMs))
+        val monthText = calendarTitleLabel(data, s)
         canvas.drawText(monthText, marginX, top + title.textSize, title)
         val coveredDays = data.cells.count { it.inMonth && it.books.isNotEmpty() }
         val totalDuration = data.cells.filter { it.inMonth }.sumOf { it.totalMs }
@@ -1507,6 +1530,15 @@ object AutoWallpaperGenerator {
         canvas.drawText(note, marginX, h - h * 0.024f, smallPaint)
         drawSourceCornerMark(canvas, w, h, sourceMark, 1f)
         return out
+    }
+
+    private fun calendarTitleLabel(data: CalendarBuildData, s: AutoSettings): String {
+        return if (s.periodMode == "LAST_30_DAYS") {
+            val fmt = SimpleDateFormat("M/d", Locale.US)
+            "${fmt.format(Date(data.monthStartMs))}-${fmt.format(Date(data.monthEndMs))}"
+        } else {
+            SimpleDateFormat("M/yyyy", Locale.US).format(Date(data.monthStartMs))
+        }
     }
 
     private fun drawCalendarBookStack(canvas: Canvas, area: RectF, books: List<CalendarCoverItem>, bodyFace: Typeface) {
