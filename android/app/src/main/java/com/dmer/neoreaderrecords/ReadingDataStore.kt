@@ -7,8 +7,10 @@ import android.database.sqlite.SQLiteOpenHelper
 
 object ReadingDataStore {
     private const val DB_NAME = "readtrace_reading.db"
-    private const val DB_VERSION = 1
+    private const val DB_VERSION = 2
     private const val TABLE_DAILY_BOOKS = "reading_daily_books"
+    private const val TABLE_DAILY_TOTALS = "reading_daily_totals"
+    private const val TABLE_PERIOD_BOOKS = "reading_period_books"
 
     data class DailyBookRecord(
         val date: String,
@@ -20,6 +22,27 @@ object ReadingDataStore {
         val durationMs: Long,
         val progress: String?,
         val status: Int,
+        val confidence: String,
+        val lastSeenAt: Long
+    )
+
+    data class DailyTotalRecord(
+        val date: String,
+        val source: String,
+        val durationMs: Long,
+        val confidence: String,
+        val updatedAt: Long
+    )
+
+    data class PeriodBookRecord(
+        val periodStart: String,
+        val periodEnd: String,
+        val source: String,
+        val bookKey: String,
+        val title: String,
+        val author: String?,
+        val coverCachePath: String?,
+        val durationMs: Long,
         val confidence: String,
         val lastSeenAt: Long
     )
@@ -47,10 +70,46 @@ object ReadingDataStore {
             )
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_daily_books_date ON $TABLE_DAILY_BOOKS(date)")
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_daily_books_source_date ON $TABLE_DAILY_BOOKS(source, date)")
+            createV2Tables(db)
         }
 
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-            // First schema version. Future migrations must keep user reading history.
+            if (oldVersion < 2) createV2Tables(db)
+        }
+
+        private fun createV2Tables(db: SQLiteDatabase) {
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS $TABLE_DAILY_TOTALS (
+                    date TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    duration_ms INTEGER NOT NULL DEFAULT 0,
+                    confidence TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(date, source)
+                )
+                """.trimIndent()
+            )
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS $TABLE_PERIOD_BOOKS (
+                    period_start TEXT NOT NULL,
+                    period_end TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    book_key TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    author TEXT,
+                    cover_cache_path TEXT,
+                    duration_ms INTEGER NOT NULL DEFAULT 0,
+                    confidence TEXT NOT NULL,
+                    last_seen_at INTEGER NOT NULL DEFAULT 0,
+                    updated_at INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(period_start, period_end, source, book_key)
+                )
+                """.trimIndent()
+            )
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_daily_totals_source_date ON $TABLE_DAILY_TOTALS(source, date)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_period_books_source_period ON $TABLE_PERIOD_BOOKS(source, period_start, period_end)")
         }
     }
 
@@ -159,6 +218,118 @@ object ReadingDataStore {
         }.getOrDefault(0)
     }
 
+    fun replaceDailyTotalsForRange(
+        context: Context,
+        source: String,
+        startDate: String,
+        endDate: String,
+        records: List<DailyTotalRecord>,
+        reason: String
+    ): Int {
+        require(startDate <= endDate) { "Invalid date range: $startDate > $endDate" }
+        val valid = records.filter { it.source == source && it.date in startDate..endDate }
+        return runCatching {
+            var written = 0
+            var deleted = 0
+            Helper(context.applicationContext).writableDatabase.use { db ->
+                db.beginTransaction()
+                try {
+                    deleted = db.delete(
+                        TABLE_DAILY_TOTALS,
+                        "source = ? AND date >= ? AND date <= ?",
+                        arrayOf(source, startDate, endDate)
+                    )
+                    valid.forEach { record ->
+                        val values = ContentValues().apply {
+                            put("date", record.date)
+                            put("source", record.source)
+                            put("duration_ms", record.durationMs)
+                            put("confidence", record.confidence)
+                            put("updated_at", record.updatedAt)
+                        }
+                        db.insertWithOnConflict(TABLE_DAILY_TOTALS, null, values, SQLiteDatabase.CONFLICT_REPLACE)
+                        written += 1
+                    }
+                    db.setTransactionSuccessful()
+                } finally {
+                    db.endTransaction()
+                }
+            }
+            AutoRefreshLog.i(
+                context,
+                "ReadingDataStore daily totals replace reason=$reason source=$source range=$startDate~$endDate deleted=$deleted records=${records.size} valid=${valid.size} written=$written"
+            )
+            written
+        }.getOrElse {
+            AutoRefreshLog.e(context, "ReadingDataStore daily totals replace failed reason=$reason source=$source", it)
+            0
+        }
+    }
+
+    fun replacePeriodBooks(
+        context: Context,
+        source: String,
+        periodStart: String,
+        periodEnd: String,
+        records: List<PeriodBookRecord>,
+        reason: String
+    ): Int {
+        val valid = records.filter {
+            it.source == source && it.periodStart == periodStart && it.periodEnd == periodEnd
+        }
+        return runCatching {
+            var written = 0
+            var deleted = 0
+            val now = System.currentTimeMillis()
+            Helper(context.applicationContext).writableDatabase.use { db ->
+                db.beginTransaction()
+                try {
+                    deleted = db.delete(
+                        TABLE_PERIOD_BOOKS,
+                        "source = ? AND period_start = ? AND period_end = ?",
+                        arrayOf(source, periodStart, periodEnd)
+                    )
+                    valid.forEach { record ->
+                        val values = ContentValues().apply {
+                            put("period_start", record.periodStart)
+                            put("period_end", record.periodEnd)
+                            put("source", record.source)
+                            put("book_key", record.bookKey)
+                            put("title", record.title)
+                            put("author", record.author)
+                            put("cover_cache_path", record.coverCachePath)
+                            put("duration_ms", record.durationMs)
+                            put("confidence", record.confidence)
+                            put("last_seen_at", record.lastSeenAt)
+                            put("updated_at", now)
+                        }
+                        db.insertWithOnConflict(TABLE_PERIOD_BOOKS, null, values, SQLiteDatabase.CONFLICT_REPLACE)
+                        written += 1
+                    }
+                    db.setTransactionSuccessful()
+                } finally {
+                    db.endTransaction()
+                }
+            }
+            AutoRefreshLog.i(
+                context,
+                "ReadingDataStore period books replace reason=$reason source=$source period=$periodStart~$periodEnd deleted=$deleted records=${records.size} valid=${valid.size} written=$written"
+            )
+            written
+        }.getOrElse {
+            AutoRefreshLog.e(context, "ReadingDataStore period books replace failed reason=$reason source=$source", it)
+            0
+        }
+    }
+
+    fun countDailyTotals(context: Context, source: String): Int {
+        return countRows(context, TABLE_DAILY_TOTALS, "source = ?", arrayOf(source))
+    }
+
+    fun countPeriodBooks(context: Context, source: String): Int {
+        return countRows(context, TABLE_PERIOD_BOOKS, "source = ?", arrayOf(source))
+    }
+
     fun queryDailyBooks(
         context: Context,
         source: String,
@@ -222,5 +393,20 @@ object ReadingDataStore {
             put("last_seen_at", lastSeenAt)
             put("updated_at", updatedAt)
         }
+    }
+
+    private fun countRows(
+        context: Context,
+        table: String,
+        selection: String,
+        args: Array<String>
+    ): Int {
+        return runCatching {
+            Helper(context.applicationContext).readableDatabase.use { db ->
+                db.query(table, arrayOf("COUNT(*)"), selection, args, null, null, null).use { c ->
+                    if (c.moveToFirst()) c.getInt(0) else 0
+                }
+            }
+        }.getOrDefault(0)
     }
 }

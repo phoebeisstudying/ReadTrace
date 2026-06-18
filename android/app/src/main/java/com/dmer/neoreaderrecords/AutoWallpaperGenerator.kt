@@ -898,6 +898,7 @@ object AutoWallpaperGenerator {
                 AutoRefreshLog.i(context, "WeRead range fetch failed period=${s.periodMode} month=${fmt(monthStart)} detail=${stats.detail}")
                 return null
             }
+            persistWeReadMonthlyStats(context, monthStart, stats)
             stats.buckets.forEach { (bucketSec, seconds) ->
                 val bucketStart = startOfDayMs(bucketSec * 1000L)
                 if (bucketStart in range.first..range.second) {
@@ -952,6 +953,7 @@ object AutoWallpaperGenerator {
                 weReadFailures.add("${fmt(monthStart)} ${stats.detail.take(80)}")
                 return@forEach
             }
+            persistWeReadMonthlyStats(context, monthStart, stats)
             stats.buckets.forEach { (bucketSec, seconds) ->
                 val bucketStart = startOfDayMs(bucketSec * 1000L)
                 if (bucketStart in range.first..range.second) {
@@ -989,6 +991,86 @@ object AutoWallpaperGenerator {
             "Mixed stats range=${fmt(range.first)}~${fmt(range.second)} localEvents=${localEvents.size} weReadEvents=${weReadEvents.size} localBooks=${localBooks.size} weReadBooks=${weReadBooks.size} mergedBooks=${mergedBooks.size} weReadFailures=${weReadFailures.size} totalMs=${chart.totalMs}"
         )
         return WeReadBuildData(range.first, range.second, chart, mergedBooks, "混合", note)
+    }
+
+    private fun persistWeReadMonthlyStats(
+        context: Context,
+        monthStartMs: Long,
+        stats: WeReadClient.WallpaperStatsResult
+    ) {
+        if (!stats.ok) return
+        val dateFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+        val monthStart = Calendar.getInstance(TimeZone.getDefault()).apply {
+            timeInMillis = monthStartMs
+            set(Calendar.DAY_OF_MONTH, 1)
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }
+        val periodStart = dateFmt.format(Date(monthStart.timeInMillis))
+        monthStart.add(Calendar.MONTH, 1)
+        monthStart.add(Calendar.DAY_OF_MONTH, -1)
+        val periodEnd = dateFmt.format(Date(monthStart.timeInMillis))
+        val now = System.currentTimeMillis()
+
+        val totals = stats.buckets.mapNotNull { (bucketSeconds, durationSeconds) ->
+            val dayMs = startOfDayMs(bucketSeconds * 1000L)
+            val date = dateFmt.format(Date(dayMs))
+            if (date !in periodStart..periodEnd || durationSeconds <= 0L) {
+                null
+            } else {
+                ReadingDataStore.DailyTotalRecord(
+                    date = date,
+                    source = "WEREAD",
+                    durationMs = durationSeconds * 1000L,
+                    confidence = "EXACT_API",
+                    updatedAt = now
+                )
+            }
+        }
+        val totalsWritten = ReadingDataStore.replaceDailyTotalsForRange(
+            context = context,
+            source = "WEREAD",
+            startDate = periodStart,
+            endDate = periodEnd,
+            records = totals,
+            reason = "weread_monthly_stats"
+        )
+
+        val latestCover = WeReadClient.cachedLatestCover(context)
+        val periodBooks = stats.books.map { book ->
+            val cachedPath = latestCover
+                ?.takeIf { it.bookId == book.bookId && it.cachePath.isNotBlank() }
+                ?.cachePath
+            ReadingDataStore.PeriodBookRecord(
+                periodStart = periodStart,
+                periodEnd = periodEnd,
+                source = "WEREAD",
+                bookKey = book.bookId.ifBlank { "${book.title.trim()}|${book.author.trim()}" },
+                title = book.title,
+                author = book.author,
+                coverCachePath = cachedPath,
+                durationMs = book.readSeconds * 1000L,
+                confidence = "MONTHLY_RANKING",
+                lastSeenAt = latestCover
+                    ?.takeIf { it.bookId == book.bookId }
+                    ?.readUpdateTimeMs
+                    ?: 0L
+            )
+        }
+        val booksWritten = ReadingDataStore.replacePeriodBooks(
+            context = context,
+            source = "WEREAD",
+            periodStart = periodStart,
+            periodEnd = periodEnd,
+            records = periodBooks,
+            reason = "weread_monthly_ranking"
+        )
+        AutoRefreshLog.i(
+            context,
+            "WeRead data store persisted period=$periodStart~$periodEnd daily=${totals.size}/$totalsWritten candidates=${periodBooks.size}/$booksWritten totalDaily=${ReadingDataStore.countDailyTotals(context, "WEREAD")} totalCandidates=${ReadingDataStore.countPeriodBooks(context, "WEREAD")}"
+        )
     }
 
     private fun queryTopBooksByDuration(
