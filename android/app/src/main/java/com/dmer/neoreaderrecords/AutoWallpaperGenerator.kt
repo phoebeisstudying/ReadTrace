@@ -599,6 +599,7 @@ object AutoWallpaperGenerator {
         var rows = 0
         var matchedRows = 0
         var unmatchedRows = 0
+        var querySucceeded = false
 
         context.contentResolver.query(
             statsUri,
@@ -607,6 +608,7 @@ object AutoWallpaperGenerator {
             arrayOf(monthStart.toString(), monthEnd.toString()),
             null
         )?.use { c ->
+            querySucceeded = true
             while (c.moveToNext()) {
                 rows += 1
                 val rawEvent = readColString(c, "eventTime")?.toLongOrNull() ?: continue
@@ -663,9 +665,16 @@ object AutoWallpaperGenerator {
         }
         AutoRefreshLog.i(
             context,
-            "calendar wallpaper data month=${fmt(monthStart)} rows=$rows metadata=${metadata.size} matched=$matchedRows unmatched=$unmatchedRows daysWithBooks=${cells.count { it.inMonth && it.books.isNotEmpty() }}"
+            "calendar wallpaper data month=${fmt(monthStart)} rows=$rows metadata=${metadata.size} matched=$matchedRows unmatched=$unmatchedRows daysWithBooks=${cells.count { it.inMonth && it.books.isNotEmpty() }} querySucceeded=$querySucceeded"
         )
-        persistNeoCalendarEstimates(context, cells)
+        if (querySucceeded) {
+            persistNeoCalendarEstimates(context, cells)
+        } else {
+            AutoRefreshLog.i(
+                context,
+                "calendar persisted neo estimates skip: statistics provider returned null range=${fmt(monthStart)}~${fmt(monthEnd)}"
+            )
+        }
         return CalendarBuildData(monthStart, monthEnd, weekRows, cells, rows, matchedRows, unmatchedRows)
     }
 
@@ -734,8 +743,13 @@ object AutoWallpaperGenerator {
 
     private fun persistNeoCalendarEstimates(context: Context, cells: List<CalendarDayCell>) {
         val dateFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
-        val records = cells
-            .filter { it.inMonth && it.books.isNotEmpty() }
+        val rangeCells = cells.filter { it.inMonth }
+        if (rangeCells.isEmpty()) {
+            AutoRefreshLog.i(context, "calendar persisted neo estimates skip: empty range cells")
+            return
+        }
+        val records = rangeCells
+            .filter { it.books.isNotEmpty() }
             .flatMap { cell ->
                 cell.books.map { book ->
                     ReadingDataStore.DailyBookRecord(
@@ -753,8 +767,20 @@ object AutoWallpaperGenerator {
                     )
                 }
             }
-        val written = ReadingDataStore.upsertDailyBooks(context, records, "neo_calendar_estimates")
-        AutoRefreshLog.i(context, "calendar persisted neo estimates records=${records.size} written=$written totalDb=${ReadingDataStore.countDailyBooks(context)}")
+        val startDate = dateFmt.format(Date(rangeCells.minOf { it.dayStartMs }))
+        val endDate = dateFmt.format(Date(rangeCells.maxOf { it.dayStartMs }))
+        val written = ReadingDataStore.replaceDailyBooksForRange(
+            context = context,
+            source = "NEO",
+            startDate = startDate,
+            endDate = endDate,
+            records = records,
+            reason = "neo_calendar_estimates"
+        )
+        AutoRefreshLog.i(
+            context,
+            "calendar persisted neo estimates range=$startDate~$endDate records=${records.size} written=$written totalDb=${ReadingDataStore.countDailyBooks(context)}"
+        )
     }
 
     private fun loadCalendarMetadata(context: Context, s: AutoSettings): List<MetadataBook> {

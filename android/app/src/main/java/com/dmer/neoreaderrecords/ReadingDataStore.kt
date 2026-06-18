@@ -96,6 +96,59 @@ object ReadingDataStore {
         }
     }
 
+    fun replaceDailyBooksForRange(
+        context: Context,
+        source: String,
+        startDate: String,
+        endDate: String,
+        records: List<DailyBookRecord>,
+        reason: String
+    ): Int {
+        require(startDate <= endDate) { "Invalid date range: $startDate > $endDate" }
+        val validRecords = records.filter {
+            it.source == source && it.date >= startDate && it.date <= endDate
+        }
+        return runCatching {
+            val now = System.currentTimeMillis()
+            var written = 0
+            var deleted = 0
+            Helper(context.applicationContext).writableDatabase.use { db ->
+                db.beginTransaction()
+                try {
+                    deleted = db.delete(
+                        TABLE_DAILY_BOOKS,
+                        "source = ? AND date >= ? AND date <= ?",
+                        arrayOf(source, startDate, endDate)
+                    )
+                    validRecords.forEach { record ->
+                        db.insertWithOnConflict(
+                            TABLE_DAILY_BOOKS,
+                            null,
+                            record.toContentValues(now),
+                            SQLiteDatabase.CONFLICT_REPLACE
+                        )
+                        written += 1
+                    }
+                    db.setTransactionSuccessful()
+                } finally {
+                    db.endTransaction()
+                }
+            }
+            AutoRefreshLog.i(
+                context,
+                "ReadingDataStore replace reason=$reason source=$source range=$startDate~$endDate deleted=$deleted records=${records.size} valid=${validRecords.size} written=$written"
+            )
+            written
+        }.getOrElse {
+            AutoRefreshLog.e(
+                context,
+                "ReadingDataStore replace failed reason=$reason source=$source range=$startDate~$endDate records=${records.size}",
+                it
+            )
+            0
+        }
+    }
+
     fun countDailyBooks(context: Context): Int {
         return runCatching {
             Helper(context.applicationContext).readableDatabase.use { db ->
@@ -151,6 +204,23 @@ object ReadingDataStore {
         }.getOrElse {
             AutoRefreshLog.e(context, "ReadingDataStore query failed source=$source range=$startDate~$endDate", it)
             emptyList()
+        }
+    }
+
+    private fun DailyBookRecord.toContentValues(updatedAt: Long): ContentValues {
+        return ContentValues().apply {
+            put("date", date)
+            put("source", source)
+            put("book_key", bookKey)
+            put("title", title)
+            put("author", author)
+            put("cover_cache_path", coverCachePath)
+            put("duration_ms", durationMs)
+            put("progress", progress)
+            put("status", status)
+            put("confidence", confidence)
+            put("last_seen_at", lastSeenAt)
+            put("updated_at", updatedAt)
         }
     }
 }
