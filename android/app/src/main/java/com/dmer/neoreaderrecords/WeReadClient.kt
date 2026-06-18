@@ -70,6 +70,11 @@ object WeReadClient {
         val readSeconds: Long
     )
 
+    data class CachedBookCover(
+        val cachePath: String,
+        val readUpdateTimeMs: Long
+    )
+
     data class BookProgressResult(
         val ok: Boolean,
         val progressPercent: Int?,
@@ -320,6 +325,63 @@ object WeReadClient {
         val coverUrl = p.getString(KEY_LAST_COVER_URL, "").orEmpty()
         val bytes = p.getLong(KEY_LAST_COVER_BYTES, file.length()).takeIf { it > 0L } ?: file.length()
         return CoverCacheResult(true, "缓存命中", "使用上次缓存：$title / $author，${file.length()} bytes", bookId, title, author, coverUrl, file.absolutePath, bytes, true)
+    }
+
+    fun cacheBookCovers(
+        context: Context,
+        apiKey: String,
+        requestedBookIds: Collection<String>
+    ): Map<String, CachedBookCover> {
+        val ids = requestedBookIds.map { it.trim() }.filter { it.isNotBlank() }.toSet()
+        if (ids.isEmpty() || apiKey.isBlank()) return emptyMap()
+        return runCatching {
+            val body = JSONObject()
+                .put("api_name", "/shelf/sync")
+                .put("skill_version", SKILL_VERSION)
+                .toString()
+            val result = postJson(apiKey.trim(), body)
+            if (result.code !in 200..299) {
+                AutoRefreshLog.i(context, "WeRead calendar cover shelf failed code=${result.code}")
+                return@runCatching emptyMap()
+            }
+            val json = JSONObject(result.body)
+            if (json.optInt("errcode", 0) != 0 || json.optJSONObject("upgrade_info") != null) {
+                AutoRefreshLog.i(context, "WeRead calendar cover shelf response unavailable")
+                return@runCatching emptyMap()
+            }
+            val books = json.optJSONArray("books") ?: return@runCatching emptyMap()
+            val dir = File(context.cacheDir, "covers/weread")
+            if (!dir.exists()) dir.mkdirs()
+            val cached = linkedMapOf<String, CachedBookCover>()
+            for (i in 0 until books.length()) {
+                val book = books.optJSONObject(i) ?: continue
+                val bookId = book.optString("bookId", "").trim()
+                if (bookId !in ids) continue
+                val file = File(dir, "${safeFileName(bookId)}.jpg")
+                if (!file.exists() || file.length() <= 0L) {
+                    val rawCover = book.optString("cover", "").trim()
+                    for (candidate in coverCandidates(rawCover, bookId)) {
+                        val bytes = runCatching { httpGetBytes(candidate) }.getOrNull() ?: continue
+                        FileOutputStream(file).use { it.write(bytes) }
+                        break
+                    }
+                }
+                if (file.exists() && file.length() > 0L) {
+                    cached[bookId] = CachedBookCover(
+                        cachePath = file.absolutePath,
+                        readUpdateTimeMs = normalizeEpochMs(book.optLong("readUpdateTime", 0L))
+                    )
+                }
+            }
+            AutoRefreshLog.i(
+                context,
+                "WeRead calendar covers requested=${ids.size} cached=${cached.size}"
+            )
+            cached
+        }.getOrElse {
+            AutoRefreshLog.e(context, "WeRead calendar covers failed requested=${ids.size}", it)
+            emptyMap()
+        }
     }
 
     fun clearCoverCacheState(context: Context) {
