@@ -56,6 +56,7 @@ object AutoWallpaperGenerator {
         val path: String,
         val status: Int,
         val durationMs: Long,
+        val lastSeenAt: Long,
         val bitmap: Bitmap?
     )
     private data class CalendarDayCell(
@@ -107,6 +108,7 @@ object AutoWallpaperGenerator {
         val readingFilterMode: String,
         val sourceMode: String,
         val wallpaperMode: String,
+        val calendarStackOrder: String,
         val coverFitMode: String,
         val progressMode: String,
         val timeUnit: String,
@@ -502,7 +504,7 @@ object AutoWallpaperGenerator {
         val coveredDays = data.cells.count { it.inMonth && it.books.isNotEmpty() }
         return PreviewResult(
             bmp,
-            "月历封面墙 month=$monthLabel daysWithCover=$coveredDays rows=${data.statsRows} matched=${data.matchedRows} unmatched=${data.unmatchedRows} 输出=${canvasSizeText(s)}"
+            "月历封面墙 month=$monthLabel stackOrder=${s.calendarStackOrder} daysWithCover=$coveredDays rows=${data.statsRows} matched=${data.matchedRows} unmatched=${data.unmatchedRows} 输出=${canvasSizeText(s)}"
         )
     }
 
@@ -593,6 +595,7 @@ object AutoWallpaperGenerator {
         val metadataByPath = metadata.associateBy { it.path }
         val candidates = metadata.filter { it.lastAccessMs > 0L }.ifEmpty { metadata }
         val durationByDayPath = linkedMapOf<Long, LinkedHashMap<String, Long>>()
+        val latestEventByDayPath = linkedMapOf<Long, LinkedHashMap<String, Long>>()
         val eventsByDay = linkedMapOf<Long, Int>()
         val unmatchedByDay = linkedMapOf<Long, Int>()
         val minMs = s.minDurationMinutes * 60_000L
@@ -631,6 +634,8 @@ object AutoWallpaperGenerator {
                 matchedRows += 1
                 val dayMap = durationByDayPath.getOrPut(day) { linkedMapOf() }
                 dayMap[matchedPath] = (dayMap[matchedPath] ?: 0L) + durationMs
+                val latestMap = latestEventByDayPath.getOrPut(day) { linkedMapOf() }
+                latestMap[matchedPath] = maxOf(latestMap[matchedPath] ?: 0L, eventMs)
             }
         }
 
@@ -639,9 +644,14 @@ object AutoWallpaperGenerator {
             val dc = Calendar.getInstance(TimeZone.getDefault()).apply { timeInMillis = dayMs }
             val inMonth = dayMs in monthStart..monthEnd
             val dayMap = durationByDayPath[dayMs].orEmpty()
-            val books = dayMap.entries
-                .sortedByDescending { it.value }
+            val latestMap = latestEventByDayPath[dayMs].orEmpty()
+            val selectedEntries = when (s.calendarStackOrder) {
+                "SHORTEST_TOP" -> dayMap.entries.sortedBy { it.value }
+                "LATEST_TOP" -> dayMap.entries.sortedByDescending { latestMap[it.key] ?: 0L }
+                else -> dayMap.entries.sortedByDescending { it.value }
+            }
                 .take(4)
+            val candidatesForDay = selectedEntries
                 .map { (path, ms) ->
                     val meta = metadataByPath[path]
                     CalendarCoverItem(
@@ -650,9 +660,11 @@ object AutoWallpaperGenerator {
                         path = path,
                         status = meta?.item?.status ?: 1,
                         durationMs = ms,
+                        lastSeenAt = latestMap[path] ?: dayMs,
                         bitmap = loadCalendarCoverBitmap(context, path)
                     )
                 }
+            val books = orderCalendarStack(candidatesForDay, s.calendarStackOrder)
             CalendarDayCell(
                 dayStartMs = dayMs,
                 dayOfMonth = dc.get(Calendar.DAY_OF_MONTH),
@@ -665,7 +677,7 @@ object AutoWallpaperGenerator {
         }
         AutoRefreshLog.i(
             context,
-            "calendar wallpaper data month=${fmt(monthStart)} rows=$rows metadata=${metadata.size} matched=$matchedRows unmatched=$unmatchedRows daysWithBooks=${cells.count { it.inMonth && it.books.isNotEmpty() }} querySucceeded=$querySucceeded"
+            "calendar wallpaper data month=${fmt(monthStart)} stackOrder=${s.calendarStackOrder} rows=$rows metadata=${metadata.size} matched=$matchedRows unmatched=$unmatchedRows daysWithBooks=${cells.count { it.inMonth && it.books.isNotEmpty() }} querySucceeded=$querySucceeded"
         )
         if (querySucceeded) {
             persistNeoCalendarEstimates(context, cells)
@@ -703,9 +715,13 @@ object AutoWallpaperGenerator {
             val inMonth = dayMs in monthStart..monthEnd
             val dayKey = dateFmt.format(Date(dayMs))
             val dayRecords = grouped[dayKey].orEmpty()
-            val books = dayRecords
-                .sortedByDescending { it.durationMs }
+            val selectedRecords = when (s.calendarStackOrder) {
+                "SHORTEST_TOP" -> dayRecords.sortedBy { it.durationMs }
+                "LATEST_TOP" -> dayRecords.sortedByDescending { it.lastSeenAt }
+                else -> dayRecords.sortedByDescending { it.durationMs }
+            }
                 .take(4)
+            val candidatesForDay = selectedRecords
                 .map { record ->
                     CalendarCoverItem(
                         title = record.title,
@@ -713,9 +729,11 @@ object AutoWallpaperGenerator {
                         path = record.bookKey,
                         status = record.status,
                         durationMs = record.durationMs,
+                        lastSeenAt = record.lastSeenAt,
                         bitmap = loadCalendarStoredCoverBitmap(context, record)
                     )
                 }
+            val books = orderCalendarStack(candidatesForDay, s.calendarStackOrder)
             CalendarDayCell(
                 dayStartMs = dayMs,
                 dayOfMonth = dc.get(Calendar.DAY_OF_MONTH),
@@ -728,7 +746,7 @@ object AutoWallpaperGenerator {
         }
         AutoRefreshLog.i(
             context,
-            "calendar wallpaper data source=db month=${fmt(monthStart)} records=${records.size} daysWithBooks=${cells.count { it.inMonth && it.books.isNotEmpty() }}"
+            "calendar wallpaper data source=db month=${fmt(monthStart)} stackOrder=${s.calendarStackOrder} records=${records.size} daysWithBooks=${cells.count { it.inMonth && it.books.isNotEmpty() }}"
         )
         return CalendarBuildData(monthStart, monthEnd, weekRows, cells, records.size, records.size, 0)
     }
@@ -763,7 +781,7 @@ object AutoWallpaperGenerator {
                         progress = null,
                         status = book.status,
                         confidence = "ESTIMATED",
-                        lastSeenAt = cell.dayStartMs
+                        lastSeenAt = book.lastSeenAt
                     )
                 }
             }
@@ -781,6 +799,18 @@ object AutoWallpaperGenerator {
             context,
             "calendar persisted neo estimates range=$startDate~$endDate records=${records.size} written=$written totalDb=${ReadingDataStore.countDailyBooks(context)}"
         )
+    }
+
+    private fun orderCalendarStack(
+        books: List<CalendarCoverItem>,
+        mode: String
+    ): List<CalendarCoverItem> {
+        // Canvas 后绘制的封面位于最上层，因此目标书必须排在列表末尾。
+        return when (mode) {
+            "SHORTEST_TOP" -> books.sortedByDescending { it.durationMs }
+            "LATEST_TOP" -> books.sortedBy { it.lastSeenAt }
+            else -> books.sortedBy { it.durationMs }
+        }
     }
 
     private fun loadCalendarMetadata(context: Context, s: AutoSettings): List<MetadataBook> {
@@ -1742,6 +1772,7 @@ object AutoWallpaperGenerator {
             readingFilterMode = p.getString("reading_filter_mode", "ALL") ?: "ALL",
             sourceMode = p.getString("source_mode", "DURATION") ?: "DURATION",
             wallpaperMode = p.getString("wallpaper_mode", "STATS") ?: "STATS",
+            calendarStackOrder = p.getString("calendar_stack_order", "LONGEST_TOP") ?: "LONGEST_TOP",
             coverFitMode = p.getString("cover_fit_mode", "FIT") ?: "FIT",
             progressMode = p.getString("progress_mode", "PAGES") ?: "PAGES",
             timeUnit = p.getString("time_unit", "HOUR") ?: "HOUR",
