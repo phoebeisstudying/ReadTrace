@@ -1872,7 +1872,7 @@ class MainActivity : ComponentActivity() {
             "COVER" -> AutoWallpaperGenerator.buildWeReadCoverPreviewFromPrefs(applicationContext, "W")
             "AUTO_COVER" -> AutoWallpaperGenerator.buildWeReadCoverPreviewFromPrefs(applicationContext, "W")
                 ?: AutoWallpaperGenerator.buildWeReadStatsPreviewFromPrefs(applicationContext, "W")
-            "CALENDAR" -> AutoWallpaperGenerator.buildWeReadCalendarPreviewFromPrefs(applicationContext, "W")
+            "CALENDAR" -> AutoWallpaperGenerator.buildLocalCalendarPreviewFromPrefs(applicationContext, "M")
             else -> AutoWallpaperGenerator.buildWeReadStatsPreviewFromPrefs(applicationContext, "W")
         }
     }
