@@ -76,7 +76,9 @@ object AutoWallpaperGenerator {
         val statsRows: Int,
         val matchedRows: Int,
         val unmatchedRows: Int,
-        val footerLabel: String = "Neo 本地月历 · 近似匹配"
+        val footerLabel: String = "Neo 本地月历 · 近似匹配",
+        val showDurationOnlyLabel: Boolean = true,
+        val showFooterLabel: Boolean = true
     )
     private data class CalendarMonthFrame(
         val monthStart: Long,
@@ -621,7 +623,9 @@ object AutoWallpaperGenerator {
             statsRows = totals.size,
             matchedRows = records.size,
             unmatchedRows = cells.count { it.inMonth && it.totalMs > 0L && it.books.isEmpty() },
-            footerLabel = "微信读书月历 · W=微信 · 封面来自快照差分"
+            footerLabel = "",
+            showDurationOnlyLabel = false,
+            showFooterLabel = false
         )
     }
 
@@ -1840,9 +1844,11 @@ object AutoWallpaperGenerator {
                         )
                     }
                 } else if (cell.inMonth && cell.eventCount > 0) {
-                    smallPaint.color = muted
-                    smallPaint.textAlign = Paint.Align.LEFT
-                    canvas.drawText("仅时长", x0 + colW * 0.08f, y0 + rowH * 0.52f, smallPaint)
+                    if (data.showDurationOnlyLabel) {
+                        smallPaint.color = muted
+                        smallPaint.textAlign = Paint.Align.LEFT
+                        canvas.drawText("仅时长", x0 + colW * 0.08f, y0 + rowH * 0.52f, smallPaint)
+                    }
                     if (cell.totalMs > 0L) {
                         drawCalendarOutlineDuration(
                             canvas,
@@ -1856,10 +1862,12 @@ object AutoWallpaperGenerator {
             }
         }
 
-        val note = "${data.footerLabel} · ${coveredDays}天有封面"
-        smallPaint.color = muted
-        smallPaint.textAlign = Paint.Align.LEFT
-        canvas.drawText(note, marginX, h - h * 0.024f, smallPaint)
+        if (data.showFooterLabel) {
+            val note = "${data.footerLabel} · ${coveredDays}天有封面"
+            smallPaint.color = muted
+            smallPaint.textAlign = Paint.Align.LEFT
+            canvas.drawText(note, marginX, h - h * 0.024f, smallPaint)
+        }
         drawSourceCornerMark(canvas, w, h, sourceMark, 1f)
         return out
     }
