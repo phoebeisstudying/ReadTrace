@@ -66,7 +66,8 @@ object AutoWallpaperGenerator {
         val totalMs: Long,
         val eventCount: Int,
         val unmatchedCount: Int,
-        val books: List<CalendarCoverItem>
+        val books: List<CalendarCoverItem>,
+        val sourceKind: String = "NEO"
     )
     private data class CalendarBuildData(
         val monthStartMs: Long,
@@ -78,7 +79,8 @@ object AutoWallpaperGenerator {
         val unmatchedRows: Int,
         val footerLabel: String = "Neo 本地月历 · 近似匹配",
         val showDurationOnlyLabel: Boolean = true,
-        val showFooterLabel: Boolean = true
+        val showFooterLabel: Boolean = true,
+        val showDaySourceLabel: Boolean = false
     )
     private data class CalendarMonthFrame(
         val monthStart: Long,
@@ -185,7 +187,7 @@ object AutoWallpaperGenerator {
         AutoRefreshLog.i(context, "Mixed auto generator start reason=$reason")
         return runCatching {
             val settings = readSettings(context)
-            if (settings.wallpaperMode != "STATS") {
+            if (settings.wallpaperMode != "STATS" && settings.wallpaperMode != "CALENDAR") {
                 WeReadReadingSync.syncCurrentMonth(context, "mixed_auto_$reason")
             }
             val built = buildMixedPreviewFromPrefs(context, "A") ?: return false
@@ -387,7 +389,7 @@ object AutoWallpaperGenerator {
         return runCatching {
             val s = readSettings(context)
             if (s.wallpaperMode == "CALENDAR") {
-                return@runCatching buildLocalCalendarPreviewForSettings(context, s, "M")
+                return@runCatching buildMixedCalendarPreviewForSettings(context, s, sourceMark)
             }
             val tryCover = s.wallpaperMode == "COVER" || s.wallpaperMode == "AUTO_COVER"
             if (tryCover) {
@@ -404,6 +406,138 @@ object AutoWallpaperGenerator {
                 "混合统计 范围=${fmt(data.rangeStart)}~${fmt(data.rangeEnd)}, 书籍=${data.books.size}, 时长=${formatDuration(data.chart.totalMs, s.timeUnit)}, ${data.note}, 输出=${canvasSizeText(s)}"
             )
         }.getOrNull()
+    }
+
+    private fun buildMixedCalendarPreviewForSettings(
+        context: Context,
+        s: AutoSettings,
+        sourceMark: String
+    ): PreviewResult? {
+        val range = resolvePeriodRange(s)
+        val frame = calendarFrameForSettings(s, range)
+        val syncOk = WeReadReadingSync.syncCurrentMonth(context, "mixed_calendar_preview")
+        val localData = buildLocalCalendarData(context, s)
+        val weReadData = buildStoredWeReadCalendarData(
+            context = context,
+            s = s,
+            monthStart = frame.monthStart,
+            monthEnd = frame.monthEnd,
+            weekRows = frame.weekRows,
+            gridStart = frame.gridStart
+        )
+        val data = mergeCalendarData(localData, weReadData, s) ?: return null
+        val bmp = drawCalendarWallpaper(context, data, s, sourceMark)
+        val localDays = data.cells.count {
+            it.inMonth && it.sourceKind == "NEO" && (it.totalMs > 0L || it.books.isNotEmpty())
+        }
+        val weReadDays = data.cells.count {
+            it.inMonth && it.sourceKind == "WEREAD" && (it.totalMs > 0L || it.books.isNotEmpty())
+        }
+        val mixedDays = data.cells.count {
+            it.inMonth && it.sourceKind == "MIXED" && (it.totalMs > 0L || it.books.isNotEmpty())
+        }
+        val source = when {
+            syncOk -> "network+db"
+            weReadData != null -> "fallback_cache"
+            else -> "local_only"
+        }
+        return PreviewResult(
+            bmp,
+            "混合月历 month=${calendarTitleLabel(data, s)} source=$source stackOrder=${s.calendarStackOrder} localDays=$localDays weReadDays=$weReadDays mixedDays=$mixedDays records=${data.matchedRows} 输出=${canvasSizeText(s)}"
+        )
+    }
+
+    private fun mergeCalendarData(
+        local: CalendarBuildData?,
+        weRead: CalendarBuildData?,
+        s: AutoSettings
+    ): CalendarBuildData? {
+        if (local == null) {
+            return weRead?.copy(
+                footerLabel = "",
+                showDurationOnlyLabel = false,
+                showFooterLabel = false,
+                showDaySourceLabel = true,
+                cells = weRead.cells.map { cell ->
+                    cell.copy(sourceKind = if (cell.totalMs > 0L || cell.books.isNotEmpty()) "WEREAD" else "NEO")
+                }
+            )
+        }
+        if (weRead == null) {
+            return local.copy(
+                footerLabel = "",
+                showFooterLabel = false,
+                showDaySourceLabel = true
+            )
+        }
+        val localByDay = local.cells.associateBy { it.dayStartMs }
+        val weReadByDay = weRead.cells.associateBy { it.dayStartMs }
+        val cells = (localByDay.keys + weReadByDay.keys).sorted().map { day ->
+            val neoCell = localByDay[day]
+            val weReadCell = weReadByDay[day]
+            val neoActive = neoCell != null && (neoCell.totalMs > 0L || neoCell.books.isNotEmpty())
+            val weReadActive = weReadCell != null && (weReadCell.totalMs > 0L || weReadCell.books.isNotEmpty())
+            CalendarDayCell(
+                dayStartMs = day,
+                dayOfMonth = neoCell?.dayOfMonth ?: weReadCell?.dayOfMonth ?: 0,
+                inMonth = neoCell?.inMonth ?: weReadCell?.inMonth ?: false,
+                totalMs = (neoCell?.totalMs ?: 0L) + (weReadCell?.totalMs ?: 0L),
+                eventCount = (neoCell?.eventCount ?: 0) + (weReadCell?.eventCount ?: 0),
+                unmatchedCount = (neoCell?.unmatchedCount ?: 0) + (weReadCell?.unmatchedCount ?: 0),
+                books = mergeCalendarBooks(
+                    neoCell?.books.orEmpty() + weReadCell?.books.orEmpty(),
+                    s.calendarStackOrder
+                ),
+                sourceKind = when {
+                    neoActive && weReadActive -> "MIXED"
+                    weReadActive -> "WEREAD"
+                    else -> "NEO"
+                }
+            )
+        }
+        return CalendarBuildData(
+            monthStartMs = local.monthStartMs,
+            monthEndMs = local.monthEndMs,
+            weekRows = local.weekRows,
+            cells = cells,
+            statsRows = local.statsRows + weRead.statsRows,
+            matchedRows = local.matchedRows + weRead.matchedRows,
+            unmatchedRows = local.unmatchedRows + weRead.unmatchedRows,
+            footerLabel = "",
+            showDurationOnlyLabel = false,
+            showFooterLabel = false,
+            showDaySourceLabel = true
+        )
+    }
+
+    private fun mergeCalendarBooks(
+        books: List<CalendarCoverItem>,
+        stackOrder: String
+    ): List<CalendarCoverItem> {
+        val merged = books
+            .groupBy { calendarBookIdentity(it.title) }
+            .map { (_, sameBook) ->
+                val preferred = sameBook.maxWithOrNull(
+                    compareBy<CalendarCoverItem> { if (it.bitmap != null) 1 else 0 }
+                        .thenBy { it.lastSeenAt }
+                ) ?: sameBook.first()
+                preferred.copy(
+                    durationMs = sameBook.sumOf { it.durationMs },
+                    lastSeenAt = sameBook.maxOf { it.lastSeenAt },
+                    status = sameBook.maxOf { it.status }
+                )
+            }
+        val selected = when (stackOrder) {
+            "SHORTEST_TOP" -> merged.sortedBy { it.durationMs }
+            "LATEST_TOP" -> merged.sortedByDescending { it.lastSeenAt }
+            else -> merged.sortedByDescending { it.durationMs }
+        }.take(4)
+        return orderCalendarStack(selected, stackOrder)
+    }
+
+    private fun calendarBookIdentity(title: String): String {
+        return title.lowercase(Locale.ROOT)
+            .replace(Regex("[\\s·•:：,，.。()（）《》【】\\[\\]_-]+"), "")
     }
 
     private fun buildWeReadPreviewForWallpaperMode(context: Context, wallpaperMode: String): PreviewResult? {
@@ -1787,7 +1921,7 @@ object AutoWallpaperGenerator {
         val uniqueBooks = data.cells
             .filter { it.inMonth }
             .flatMap { it.books }
-            .distinctBy { it.path.ifBlank { it.title } }
+            .distinctBy { calendarBookIdentity(it.title) }
         val activeDays = data.cells.count { it.inMonth && it.totalMs > 0L }
         val averagePerActiveDay = if (activeDays > 0) totalDuration / activeDays else 0L
         canvas.drawText("总时长 ${compactDuration(totalDuration)}", w - marginX, top + title.textSize * 0.46f, summaryPaint)
@@ -1825,6 +1959,24 @@ object AutoWallpaperGenerator {
                 val alpha = if (cell.inMonth) 255 else 70
                 dayPaint.color = if (col == 6) Color.argb(alpha, 200, 56, 48) else Color.argb(alpha, 48, 20, 20)
                 canvas.drawText(cell.dayOfMonth.toString(), x0 + colW * 0.08f, y0 + rowH * 0.22f, dayPaint)
+                if (
+                    data.showDaySourceLabel &&
+                    cell.inMonth &&
+                    (cell.totalMs > 0L || cell.books.isNotEmpty())
+                ) {
+                    smallPaint.color = when (cell.sourceKind) {
+                        "WEREAD" -> Color.rgb(47, 105, 76)
+                        "MIXED" -> accent
+                        else -> muted
+                    }
+                    smallPaint.textAlign = Paint.Align.RIGHT
+                    val sourceLabel = when (cell.sourceKind) {
+                        "WEREAD" -> "W"
+                        "MIXED" -> "M"
+                        else -> "N"
+                    }
+                    canvas.drawText(sourceLabel, x0 + colW * 0.91f, y0 + rowH * 0.18f, smallPaint)
+                }
 
                 if (cell.inMonth && cell.books.isNotEmpty()) {
                     val coverArea = RectF(
