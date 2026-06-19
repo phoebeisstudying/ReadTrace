@@ -37,7 +37,10 @@ class AutoRefreshWorker(context: Context, params: WorkerParameters) : Worker(con
         val delta = now - lastMs
 
         if (sourceMode == "WEREAD" || sourceMode == "MIXED") {
-            if (reason != "screen_on_prewarm" && reason != "user_present_prewarm") {
+            val remoteAllowed = reason == "screen_on_prewarm" ||
+                reason == "user_present_prewarm" ||
+                reason == "daily_alarm"
+            if (!remoteAllowed) {
                 AutoRefreshLog.i(applicationContext, "Worker skip remote source=$sourceMode on reason=$reason")
                 return Result.success()
             }

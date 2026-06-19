@@ -447,8 +447,14 @@ class MainActivity : ComponentActivity() {
             val wallpaperMode = prefs.getString("wallpaper_mode", "STATS") ?: "STATS"
             val incrementalOk = wallpaperMode == "CALENDAR" ||
                 AutoWallpaperGenerator.syncRecentNeoReadingStore(applicationContext, "app_start")
+            val sourceMode = prefs.getString("source_mode", "DURATION") ?: "DURATION"
+            val weReadOk = if (sourceMode == "WEREAD" || sourceMode == "MIXED") {
+                WeReadReadingSync.syncCurrentMonth(applicationContext, "app_start")
+            } else {
+                true
+            }
             appendUiDebug(
-                "readingStoreMaintenance finished bootstrapOk=$bootstrapOk incrementalOk=$incrementalOk wallpaperMode=$wallpaperMode"
+                "readingStoreMaintenance finished bootstrapOk=$bootstrapOk incrementalOk=$incrementalOk weReadOk=$weReadOk sourceMode=$sourceMode wallpaperMode=$wallpaperMode"
             )
         }.apply {
             name = "reading-store-bootstrap"

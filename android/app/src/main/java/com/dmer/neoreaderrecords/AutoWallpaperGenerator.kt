@@ -161,6 +161,9 @@ object AutoWallpaperGenerator {
         AutoRefreshLog.i(context, "WeRead auto generator start reason=$reason")
         return runCatching {
             val s = readSettings(context)
+            if (s.wallpaperMode != "STATS") {
+                WeReadReadingSync.syncCurrentMonth(context, "weread_auto_$reason")
+            }
             val built = buildWeReadPreviewForWallpaperMode(context, s.wallpaperMode) ?: return false
             if ((reason.startsWith("screen_on_prewarm") || reason.startsWith("user_present_prewarm")) &&
                 built.summary.contains("source=fallback_cache")
@@ -180,6 +183,10 @@ object AutoWallpaperGenerator {
     fun generateAndSaveMixed(context: Context, reason: String): Boolean {
         AutoRefreshLog.i(context, "Mixed auto generator start reason=$reason")
         return runCatching {
+            val settings = readSettings(context)
+            if (settings.wallpaperMode != "STATS") {
+                WeReadReadingSync.syncCurrentMonth(context, "mixed_auto_$reason")
+            }
             val built = buildMixedPreviewFromPrefs(context, "A") ?: return false
             if ((reason.startsWith("screen_on_prewarm") || reason.startsWith("user_present_prewarm")) &&
                 built.summary.contains("source=fallback_cache")
@@ -993,10 +1000,11 @@ object AutoWallpaperGenerator {
         return WeReadBuildData(range.first, range.second, chart, mergedBooks, "混合", note)
     }
 
-    private fun persistWeReadMonthlyStats(
+    internal fun persistWeReadMonthlyStats(
         context: Context,
         monthStartMs: Long,
-        stats: WeReadClient.WallpaperStatsResult
+        stats: WeReadClient.WallpaperStatsResult,
+        captureSnapshot: Boolean = true
     ) {
         if (!stats.ok) return
         val dateFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
@@ -1071,6 +1079,9 @@ object AutoWallpaperGenerator {
             context,
             "WeRead data store persisted period=$periodStart~$periodEnd daily=${totals.size}/$totalsWritten candidates=${periodBooks.size}/$booksWritten totalDaily=${ReadingDataStore.countDailyTotals(context, "WEREAD")} totalCandidates=${ReadingDataStore.countPeriodBooks(context, "WEREAD")}"
         )
+        if (captureSnapshot) {
+            WeReadReadingSync.captureCurrentMonth(context, monthStartMs, stats)
+        }
     }
 
     private fun queryTopBooksByDuration(

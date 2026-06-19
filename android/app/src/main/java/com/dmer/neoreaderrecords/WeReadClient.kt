@@ -70,10 +70,26 @@ object WeReadClient {
         val readSeconds: Long
     )
 
+    data class ShelfBook(
+        val bookKey: String,
+        val title: String,
+        val author: String,
+        val coverUrl: String,
+        val readUpdateTimeMs: Long,
+        val status: Int
+    )
+
+    data class ShelfSnapshotResult(
+        val ok: Boolean,
+        val detail: String,
+        val books: List<ShelfBook>
+    )
+
     data class BookProgressResult(
         val ok: Boolean,
         val progressPercent: Int?,
         val recordReadingSeconds: Long,
+        val updateTimeMs: Long,
         val detail: String
     )
 
@@ -322,6 +338,98 @@ object WeReadClient {
         return CoverCacheResult(true, "缓存命中", "使用上次缓存：$title / $author，${file.length()} bytes", bookId, title, author, coverUrl, file.absolutePath, bytes, true)
     }
 
+    fun fetchShelfSnapshot(context: Context, apiKey: String): ShelfSnapshotResult {
+        val key = apiKey.trim()
+        if (key.isBlank()) return ShelfSnapshotResult(false, "未配置 API Key", emptyList())
+        return try {
+            val body = JSONObject()
+                .put("api_name", "/shelf/sync")
+                .put("skill_version", SKILL_VERSION)
+                .toString()
+            val result = postJson(key, body)
+            if (result.code !in 200..299) {
+                return ShelfSnapshotResult(false, "HTTP ${result.code}: ${result.body.take(120)}", emptyList())
+            }
+            val json = JSONObject(result.body)
+            val upgradeInfo = json.optJSONObject("upgrade_info")
+            if (upgradeInfo != null) {
+                return ShelfSnapshotResult(
+                    false,
+                    "Skill 需要升级：${upgradeInfo.optString("message", "请升级 skill")}",
+                    emptyList()
+                )
+            }
+            val errCode = json.optInt("errcode", 0)
+            if (errCode != 0) {
+                return ShelfSnapshotResult(
+                    false,
+                    "接口错误 errcode=$errCode ${json.optString("errmsg", "").take(80)}",
+                    emptyList()
+                )
+            }
+            val out = mutableListOf<ShelfBook>()
+            json.optJSONArray("books")?.let { books ->
+                for (i in 0 until books.length()) {
+                    val book = books.optJSONObject(i) ?: continue
+                    val bookId = book.optString("bookId", "").trim()
+                    if (bookId.isBlank()) continue
+                    out.add(
+                        ShelfBook(
+                            bookKey = bookId,
+                            title = book.optString("title", "未知书籍").ifBlank { "未知书籍" },
+                            author = book.optString("author", "未知作者").ifBlank { "未知作者" },
+                            coverUrl = book.optString("cover", "").trim(),
+                            readUpdateTimeMs = normalizeEpochMs(book.optLong("readUpdateTime", 0L)),
+                            status = if (book.optInt("finishReading", 0) == 1) 2 else 1
+                        )
+                    )
+                }
+            }
+            json.optJSONArray("albums")?.let { albums ->
+                for (i in 0 until albums.length()) {
+                    val album = albums.optJSONObject(i) ?: continue
+                    val info = album.optJSONObject("albumInfo") ?: continue
+                    val extra = album.optJSONObject("albumInfoExtra")
+                    val albumId = info.optString("albumId", "").trim()
+                    if (albumId.isBlank()) continue
+                    out.add(
+                        ShelfBook(
+                            bookKey = "album:$albumId",
+                            title = info.optString("name", "未知专辑").ifBlank { "未知专辑" },
+                            author = info.optString("authorName", "未知作者").ifBlank { "未知作者" },
+                            coverUrl = info.optString("cover", "").trim(),
+                            readUpdateTimeMs = normalizeEpochMs(extra?.optLong("lectureReadUpdateTime", 0L) ?: 0L),
+                            status = if (info.optInt("finish", 0) == 1) 2 else 1
+                        )
+                    )
+                }
+            }
+            AutoRefreshLog.i(
+                context,
+                "WeRead shelf snapshot success entries=${out.size} readable=${out.count { it.readUpdateTimeMs > 0L }}"
+            )
+            ShelfSnapshotResult(true, "书架快照 ${out.size} 条", out)
+        } catch (e: Exception) {
+            AutoRefreshLog.e(context, "WeRead shelf snapshot failed", e)
+            ShelfSnapshotResult(false, "${e.javaClass.simpleName}: ${e.message ?: "读取失败"}", emptyList())
+        }
+    }
+
+    fun cacheShelfBookCover(context: Context, book: ShelfBook): String? {
+        if (book.coverUrl.isBlank()) return null
+        val dir = File(context.cacheDir, "covers/weread")
+        if (!dir.exists()) dir.mkdirs()
+        val file = File(dir, "${safeFileName(book.bookKey)}.jpg")
+        if (file.exists() && file.length() > 0L) return file.absolutePath
+        val rawBookId = book.bookKey.removePrefix("album:")
+        for (candidate in coverCandidates(book.coverUrl, rawBookId)) {
+            val bytes = runCatching { httpGetBytes(candidate) }.getOrNull() ?: continue
+            FileOutputStream(file).use { it.write(bytes) }
+            return file.absolutePath
+        }
+        return null
+    }
+
     fun clearCoverCacheState(context: Context) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
@@ -416,7 +524,9 @@ object WeReadClient {
                     val author = book?.optString("author")?.takeIf { it.isNotBlank() }
                         ?: album?.optString("authorName")?.takeIf { it.isNotBlank() }
                         ?: "未知"
-                    val bookId = book?.optString("bookId")?.takeIf { it.isNotBlank() }.orEmpty()
+                    val bookId = book?.optString("bookId")?.takeIf { it.isNotBlank() }
+                        ?: album?.optString("albumId")?.takeIf { it.isNotBlank() }?.let { "album:$it" }
+                        .orEmpty()
                     books.add(WallpaperBook(bookId, title, author, item.optLong("readTime", 0L)))
                 }
             }
@@ -433,8 +543,8 @@ object WeReadClient {
 
     fun fetchBookProgress(context: Context, apiKey: String, bookId: String): BookProgressResult {
         val key = apiKey.trim()
-        if (key.isBlank()) return BookProgressResult(false, null, 0L, "未配置 API Key")
-        if (bookId.isBlank()) return BookProgressResult(false, null, 0L, "缺少 bookId")
+        if (key.isBlank()) return BookProgressResult(false, null, 0L, 0L, "未配置 API Key")
+        if (bookId.isBlank()) return BookProgressResult(false, null, 0L, 0L, "缺少 bookId")
         return try {
             val body = JSONObject()
                 .put("api_name", "/book/getprogress")
@@ -443,25 +553,26 @@ object WeReadClient {
             val result = postJson(key, body.toString())
             AutoRefreshLog.i(context, "WeRead book progress http bookId=${bookId.take(10)} code=${result.code} bytes=${result.body.length}")
             if (result.code !in 200..299) {
-                return BookProgressResult(false, null, 0L, "HTTP ${result.code}")
+                return BookProgressResult(false, null, 0L, 0L, "HTTP ${result.code}")
             }
             val json = JSONObject(result.body)
             val upgradeInfo = json.optJSONObject("upgrade_info")
             if (upgradeInfo != null) {
-                return BookProgressResult(false, null, 0L, "Skill 需要升级：${upgradeInfo.optString("message", "请升级 skill")}")
+                return BookProgressResult(false, null, 0L, 0L, "Skill 需要升级：${upgradeInfo.optString("message", "请升级 skill")}")
             }
             val errCode = json.optInt("errcode", 0)
             if (errCode != 0) {
-                return BookProgressResult(false, null, 0L, "接口错误 errcode=$errCode ${json.optString("errmsg", "").take(80)}")
+                return BookProgressResult(false, null, 0L, 0L, "接口错误 errcode=$errCode ${json.optString("errmsg", "").take(80)}")
             }
             val book = json.optJSONObject("book")
             val progress = book?.optInt("progress", -1)?.takeIf { it >= 0 }
             val recordReadingTime = book?.optLong("recordReadingTime", 0L) ?: 0L
-            AutoRefreshLog.i(context, "WeRead book progress success bookId=${bookId.take(10)} progress=${progress ?: -1} recordReadingTime=$recordReadingTime")
-            BookProgressResult(true, progress, recordReadingTime, "progress=${progress ?: "-"} recordReadingTime=$recordReadingTime")
+            val updateTimeMs = normalizeEpochMs(book?.optLong("updateTime", 0L) ?: 0L)
+            AutoRefreshLog.i(context, "WeRead book progress success bookId=${bookId.take(10)} progress=${progress ?: -1} recordReadingTime=$recordReadingTime updateTimeMs=$updateTimeMs")
+            BookProgressResult(true, progress, recordReadingTime, updateTimeMs, "progress=${progress ?: "-"} recordReadingTime=$recordReadingTime")
         } catch (e: Exception) {
             AutoRefreshLog.e(context, "WeRead book progress failed bookId=${bookId.take(10)}", e)
-            BookProgressResult(false, null, 0L, "${e.javaClass.simpleName}: ${e.message ?: "读取失败"}")
+            BookProgressResult(false, null, 0L, 0L, "${e.javaClass.simpleName}: ${e.message ?: "读取失败"}")
         }
     }
 

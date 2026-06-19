@@ -7,10 +7,13 @@ import android.database.sqlite.SQLiteOpenHelper
 
 object ReadingDataStore {
     private const val DB_NAME = "readtrace_reading.db"
-    private const val DB_VERSION = 2
+    private const val DB_VERSION = 3
     private const val TABLE_DAILY_BOOKS = "reading_daily_books"
     private const val TABLE_DAILY_TOTALS = "reading_daily_totals"
     private const val TABLE_PERIOD_BOOKS = "reading_period_books"
+    private const val TABLE_WEREAD_BOOK_STATE = "weread_book_state"
+    private const val TABLE_WEREAD_PERIOD_STATE = "weread_period_state"
+    private const val TABLE_SYNC_META = "reading_sync_meta"
 
     data class DailyBookRecord(
         val date: String,
@@ -47,6 +50,32 @@ object ReadingDataStore {
         val lastSeenAt: Long
     )
 
+    data class WeReadBookState(
+        val bookKey: String,
+        val lastReadAt: Long,
+        val recordReadingMs: Long
+    )
+
+    data class WeReadSnapshotBook(
+        val bookKey: String,
+        val title: String,
+        val author: String?,
+        val coverCachePath: String?,
+        val lastReadAt: Long,
+        val readDate: String?,
+        val monthlyDurationMs: Long?,
+        val recordReadingMs: Long?,
+        val progress: String?,
+        val status: Int
+    )
+
+    data class WeReadSnapshotApplyResult(
+        val baseline: Boolean,
+        val changedBooks: Int,
+        val dailyRecordsWritten: Int,
+        val trackingStartDate: String
+    )
+
     private class Helper(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
         override fun onCreate(db: SQLiteDatabase) {
             db.execSQL(
@@ -71,10 +100,12 @@ object ReadingDataStore {
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_daily_books_date ON $TABLE_DAILY_BOOKS(date)")
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_daily_books_source_date ON $TABLE_DAILY_BOOKS(source, date)")
             createV2Tables(db)
+            createV3Tables(db)
         }
 
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
             if (oldVersion < 2) createV2Tables(db)
+            if (oldVersion < 3) createV3Tables(db)
         }
 
         private fun createV2Tables(db: SQLiteDatabase) {
@@ -110,6 +141,44 @@ object ReadingDataStore {
             )
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_daily_totals_source_date ON $TABLE_DAILY_TOTALS(source, date)")
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_period_books_source_period ON $TABLE_PERIOD_BOOKS(source, period_start, period_end)")
+        }
+
+        private fun createV3Tables(db: SQLiteDatabase) {
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS $TABLE_WEREAD_BOOK_STATE (
+                    book_key TEXT NOT NULL PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    author TEXT,
+                    cover_cache_path TEXT,
+                    last_read_at INTEGER NOT NULL DEFAULT 0,
+                    record_reading_ms INTEGER NOT NULL DEFAULT 0,
+                    progress TEXT,
+                    status INTEGER NOT NULL DEFAULT 1,
+                    updated_at INTEGER NOT NULL DEFAULT 0
+                )
+                """.trimIndent()
+            )
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS $TABLE_WEREAD_PERIOD_STATE (
+                    period_start TEXT NOT NULL,
+                    period_end TEXT NOT NULL,
+                    book_key TEXT NOT NULL,
+                    duration_ms INTEGER NOT NULL DEFAULT 0,
+                    updated_at INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(period_start, period_end, book_key)
+                )
+                """.trimIndent()
+            )
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS $TABLE_SYNC_META (
+                    key TEXT NOT NULL PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                """.trimIndent()
+            )
         }
     }
 
@@ -328,6 +397,220 @@ object ReadingDataStore {
 
     fun countPeriodBooks(context: Context, source: String): Int {
         return countRows(context, TABLE_PERIOD_BOOKS, "source = ?", arrayOf(source))
+    }
+
+    fun queryWeReadBookStates(context: Context): Map<String, WeReadBookState> {
+        return runCatching {
+            val out = linkedMapOf<String, WeReadBookState>()
+            Helper(context.applicationContext).readableDatabase.use { db ->
+                db.query(
+                    TABLE_WEREAD_BOOK_STATE,
+                    arrayOf("book_key", "last_read_at", "record_reading_ms"),
+                    null,
+                    null,
+                    null,
+                    null,
+                    null
+                ).use { c ->
+                    while (c.moveToNext()) {
+                        val state = WeReadBookState(c.getString(0), c.getLong(1), c.getLong(2))
+                        out[state.bookKey] = state
+                    }
+                }
+            }
+            out
+        }.getOrElse {
+            AutoRefreshLog.e(context, "ReadingDataStore WeRead state query failed", it)
+            emptyMap()
+        }
+    }
+
+    fun applyWeReadSnapshot(
+        context: Context,
+        periodStart: String,
+        periodEnd: String,
+        trackingDate: String,
+        books: List<WeReadSnapshotBook>
+    ): WeReadSnapshotApplyResult? {
+        return runCatching {
+            val now = System.currentTimeMillis()
+            var baseline = false
+            var changedBooks = 0
+            var dailyWritten = 0
+            var trackingStartDate = trackingDate
+            Helper(context.applicationContext).writableDatabase.use { db ->
+                db.beginTransaction()
+                try {
+                    val priorBookTimes = linkedMapOf<String, Long>()
+                    val priorRecordReading = linkedMapOf<String, Long>()
+                    db.query(
+                        TABLE_WEREAD_BOOK_STATE,
+                        arrayOf("book_key", "last_read_at", "record_reading_ms"),
+                        null,
+                        null,
+                        null,
+                        null,
+                        null
+                    ).use { c ->
+                        while (c.moveToNext()) {
+                            priorBookTimes[c.getString(0)] = c.getLong(1)
+                            priorRecordReading[c.getString(0)] = c.getLong(2)
+                        }
+                    }
+                    baseline = priorBookTimes.isEmpty()
+                    if (baseline) {
+                        val deletedLegacy = db.delete(
+                            TABLE_DAILY_BOOKS,
+                            "source = ?",
+                            arrayOf("WEREAD")
+                        )
+                        AutoRefreshLog.i(
+                            context,
+                            "ReadingDataStore WeRead baseline cleared legacy daily records=$deletedLegacy"
+                        )
+                    }
+                    trackingStartDate = db.query(
+                        TABLE_SYNC_META,
+                        arrayOf("value"),
+                        "key = ?",
+                        arrayOf("weread_tracking_start_date"),
+                        null,
+                        null,
+                        null
+                    ).use { c ->
+                        if (c.moveToFirst()) c.getString(0) else trackingDate
+                    }
+                    db.insertWithOnConflict(
+                        TABLE_SYNC_META,
+                        null,
+                        ContentValues().apply {
+                            put("key", "weread_tracking_start_date")
+                            put("value", trackingStartDate)
+                        },
+                        SQLiteDatabase.CONFLICT_IGNORE
+                    )
+
+                    val priorPeriodDurations = linkedMapOf<String, Long>()
+                    db.query(
+                        TABLE_WEREAD_PERIOD_STATE,
+                        arrayOf("book_key", "duration_ms"),
+                        "period_start = ? AND period_end = ?",
+                        arrayOf(periodStart, periodEnd),
+                        null,
+                        null,
+                        null
+                    ).use { c ->
+                        while (c.moveToNext()) priorPeriodDurations[c.getString(0)] = c.getLong(1)
+                    }
+
+                    books.forEach { book ->
+                        val priorReadAt = priorBookTimes[book.bookKey] ?: 0L
+                        val changed = !baseline &&
+                            book.lastReadAt > priorReadAt &&
+                            !book.readDate.isNullOrBlank() &&
+                            book.readDate >= trackingStartDate &&
+                            book.readDate <= trackingDate
+                        if (changed) {
+                            val readDate = requireNotNull(book.readDate)
+                            changedBooks += 1
+                            val currentDuration = book.monthlyDurationMs
+                            val previousDuration = priorPeriodDurations[book.bookKey]
+                            val monthlyDelta = if (
+                                currentDuration != null &&
+                                previousDuration != null &&
+                                currentDuration >= previousDuration
+                            ) {
+                                currentDuration - previousDuration
+                            } else {
+                                0L
+                            }
+                            val currentRecordReading = book.recordReadingMs
+                            val previousRecordReading = priorRecordReading[book.bookKey]
+                            val progressDelta = if (
+                                currentRecordReading != null &&
+                                previousRecordReading != null &&
+                                currentRecordReading >= previousRecordReading
+                            ) {
+                                currentRecordReading - previousRecordReading
+                            } else {
+                                0L
+                            }
+                            val delta = monthlyDelta.takeIf { it > 0L } ?: progressDelta
+                            val existingDuration = db.query(
+                                TABLE_DAILY_BOOKS,
+                                arrayOf("duration_ms"),
+                                "date = ? AND source = ? AND book_key = ?",
+                                arrayOf(readDate, "WEREAD", book.bookKey),
+                                null,
+                                null,
+                                null
+                            ).use { c -> if (c.moveToFirst()) c.getLong(0) else 0L }
+                            db.insertWithOnConflict(
+                                TABLE_DAILY_BOOKS,
+                                null,
+                                ContentValues().apply {
+                                    put("date", readDate)
+                                    put("source", "WEREAD")
+                                    put("book_key", book.bookKey)
+                                    put("title", book.title)
+                                    put("author", book.author)
+                                    put("cover_cache_path", book.coverCachePath)
+                                    put("duration_ms", existingDuration + delta)
+                                    put("progress", book.progress)
+                                    put("status", book.status)
+                                    put("confidence", if (delta > 0L) "SNAPSHOT_DELTA" else "SHELF_EVENT")
+                                    put("last_seen_at", book.lastReadAt)
+                                    put("updated_at", now)
+                                },
+                                SQLiteDatabase.CONFLICT_REPLACE
+                            )
+                            dailyWritten += 1
+                        }
+
+                        db.insertWithOnConflict(
+                            TABLE_WEREAD_BOOK_STATE,
+                            null,
+                            ContentValues().apply {
+                                put("book_key", book.bookKey)
+                                put("title", book.title)
+                                put("author", book.author)
+                                put("cover_cache_path", book.coverCachePath)
+                                put("last_read_at", book.lastReadAt)
+                                put(
+                                    "record_reading_ms",
+                                    book.recordReadingMs ?: priorRecordReading[book.bookKey] ?: 0L
+                                )
+                                put("progress", book.progress)
+                                put("status", book.status)
+                                put("updated_at", now)
+                            },
+                            SQLiteDatabase.CONFLICT_REPLACE
+                        )
+                        book.monthlyDurationMs?.let { duration ->
+                            db.insertWithOnConflict(
+                                TABLE_WEREAD_PERIOD_STATE,
+                                null,
+                                ContentValues().apply {
+                                    put("period_start", periodStart)
+                                    put("period_end", periodEnd)
+                                    put("book_key", book.bookKey)
+                                    put("duration_ms", duration)
+                                    put("updated_at", now)
+                                },
+                                SQLiteDatabase.CONFLICT_REPLACE
+                            )
+                        }
+                    }
+                    db.setTransactionSuccessful()
+                } finally {
+                    db.endTransaction()
+                }
+            }
+            WeReadSnapshotApplyResult(baseline, changedBooks, dailyWritten, trackingStartDate)
+        }.getOrElse {
+            AutoRefreshLog.e(context, "ReadingDataStore WeRead snapshot apply failed", it)
+            null
+        }
     }
 
     fun queryDailyBooks(
