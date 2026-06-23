@@ -2253,7 +2253,7 @@ object AutoWallpaperGenerator {
         drawFittedText(c, serialValue, leftMargin + prefixWidth, serialBaseY, serialNumberPaint, (summaryLeft - leftMargin - prefixWidth - s(24f)).coerceAtLeast(s(180f)), Paint.Align.LEFT, 0.7f)
         drawFittedText(c, "操作编号: ${System.currentTimeMillis().toString().takeLast(6)}", leftMargin, y + s(95f), text, leftInfoMaxWidth, Paint.Align.LEFT, 0.78f)
         drawFittedText(c, "时间: ${fmt(rangeStart)} - ${fmt(rangeEnd)}", leftMargin, y + s(145f), text, leftInfoMaxWidth, Paint.Align.LEFT, 0.78f)
-        drawFittedText(c, "设备: ${devicePreset.displayText()}", leftMargin, y + s(195f), text, leftInfoMaxWidth, Paint.Align.LEFT, 0.78f)
+        drawFittedText(c, "设备: ${devicePreset.label}", leftMargin, y + s(195f), text, leftInfoMaxWidth, Paint.Align.LEFT, 0.78f)
         drawFittedText(c, "时长: ${formatDuration(stats.totalMs, s0.timeUnit)}", rightEdge, y + s(145f), h1, summaryWidth, Paint.Align.RIGHT, 0.76f)
         drawFittedText(c, "书籍: ${books.size}", rightEdge, y + s(195f), text, summaryWidth, Paint.Align.RIGHT, 0.78f)
 
