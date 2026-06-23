@@ -2247,7 +2247,8 @@ object AutoWallpaperGenerator {
         val leftMargin = s(60f)
         val rightMargin = s(60f)
         val rightEdge = w - rightMargin
-        val summaryWidth = s(380f).coerceAtMost(w * 0.46f)
+        val summaryWidth = maxOf(s(380f), w * 0.46f)
+            .coerceAtMost((w - leftMargin - rightMargin - s(280f)).coerceAtLeast(w * 0.34f))
         val summaryLeft = rightEdge - summaryWidth
         val leftInfoMaxWidth = (summaryLeft - leftMargin - s(24f)).coerceAtLeast(w * 0.35f)
         val noX = leftMargin
