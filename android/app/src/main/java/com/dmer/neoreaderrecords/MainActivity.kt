@@ -76,6 +76,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var bodySizeInput: EditText
     private lateinit var serialNumberSizeInput: EditText
     private lateinit var serialCustomInput: EditText
+    private lateinit var customWallpaperWidthInput: EditText
+    private lateinit var customWallpaperHeightInput: EditText
     private lateinit var noteInput: EditText
     private lateinit var weekStartText: TextView
     private lateinit var weekEndText: TextView
@@ -85,6 +87,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var readingFilterGroup: RadioGroup
     private lateinit var timeUnitGroup: RadioGroup
     private lateinit var wallpaperModeGroup: RadioGroup
+    private lateinit var calendarStackOrderGroup: RadioGroup
     private lateinit var booxDevicePresetGroup: RadioGroup
     private lateinit var coverFitModeGroup: RadioGroup
     private lateinit var serialModeGroup: RadioGroup
@@ -95,6 +98,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var yAxisModeGroup: RadioGroup
     private lateinit var showPeakLabelCheck: CheckBox
     private lateinit var yAxisMaxInput: EditText
+    private lateinit var readingDataStoreCheck: CheckBox
     private lateinit var autoRefreshCheck: CheckBox
     private lateinit var autoModeGroup: RadioGroup
     private lateinit var autoDailyTimeInput: EditText
@@ -178,7 +182,7 @@ class MainActivity : ComponentActivity() {
     )
 
     enum class DataSourceMode { DURATION, PATH_SESSION, METADATA_ACCESS, WEREAD, MIXED }
-    enum class PeriodMode { TODAY, YESTERDAY, THIS_WEEK, LAST_WEEK, LAST_7_DAYS, LAST_30_DAYS, CUSTOM }
+    enum class PeriodMode { TODAY, YESTERDAY, THIS_WEEK, LAST_WEEK, THIS_MONTH, LAST_7_DAYS, LAST_30_DAYS, CUSTOM }
     enum class ReadingFilterMode { ALL, READING_ONLY, FINISHED_ONLY }
     enum class ChartStyleMode { LINE, BAR }
     enum class YAxisMode { AUTO, FIXED }
@@ -197,6 +201,7 @@ class MainActivity : ComponentActivity() {
         val readingFilterMode: ReadingFilterMode,
         val sourceMode: DataSourceMode,
         val wallpaperMode: String,
+        val calendarStackOrder: String,
         val coverFitMode: String,
         val progressMode: String,
         val timeUnit: String,
@@ -207,6 +212,8 @@ class MainActivity : ComponentActivity() {
         val serialNumberCustom: String,
         val serialNumberSize: Float,
         val booxDevicePreset: String,
+        val customWallpaperWidth: Int,
+        val customWallpaperHeight: Int,
         val footerMode: String,
         val barcodeWidthScale: Float,
         val barcodeGapMode: String,
@@ -426,6 +433,43 @@ class MainActivity : ComponentActivity() {
         applySettingsPreview()
         checkForUpdatesIfNeeded(force = false)
         writeDebugLog("setupUi_done")
+        startReadingStoreBootstrapIfNeeded()
+    }
+
+    private fun startReadingStoreBootstrapIfNeeded() {
+        val prefs = getSharedPreferences(AutoRefreshConfig.PREFS_NAME, Context.MODE_PRIVATE)
+        if (!AutoRefreshConfig.isReadingDataStoreEnabled(this)) {
+            appendUiDebug("readingStoreMaintenance skip disabled")
+            return
+        }
+        val key = "reading_store_bootstrap_neo_month_v1_done"
+        Thread {
+            val bootstrapDone = prefs.getBoolean(key, false)
+            val bootstrapOk = if (bootstrapDone) {
+                appendUiDebug("readingStoreBootstrap skip alreadyDone")
+                true
+            } else {
+                AutoWallpaperGenerator.bootstrapReadingStoreIfNeeded(applicationContext).also { ok ->
+                    if (ok) prefs.edit().putBoolean(key, true).apply()
+                }
+            }
+            val wallpaperMode = prefs.getString("wallpaper_mode", "STATS") ?: "STATS"
+            val incrementalOk = wallpaperMode == "CALENDAR" ||
+                AutoWallpaperGenerator.syncRecentNeoReadingStore(applicationContext, "app_start")
+            val sourceMode = prefs.getString("source_mode", "DURATION") ?: "DURATION"
+            val weReadOk = if (sourceMode == "WEREAD" || sourceMode == "MIXED") {
+                WeReadReadingSync.syncCurrentMonth(applicationContext, "app_start")
+            } else {
+                true
+            }
+            appendUiDebug(
+                "readingStoreMaintenance finished bootstrapOk=$bootstrapOk incrementalOk=$incrementalOk weReadOk=$weReadOk sourceMode=$sourceMode wallpaperMode=$wallpaperMode"
+            )
+        }.apply {
+            name = "reading-store-bootstrap"
+            isDaemon = true
+            start()
+        }
     }
 
     private fun appendUiDebug(message: String) {
@@ -482,7 +526,16 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun booxPresetKeyByRadioId(id: Int): String {
-        return BooxDevicePresets.all.getOrNull(id - 1301)?.key ?: BooxDevicePresets.DEFAULT_KEY
+        if (id == 1301) return BooxDevicePresets.CUSTOM_KEY
+        return BooxDevicePresets.all.getOrNull(id - 1302)?.key ?: BooxDevicePresets.DEFAULT_KEY
+    }
+
+    private fun wallpaperSizeDisplayText(settings: Settings): String {
+        return if (settings.booxDevicePreset == BooxDevicePresets.CUSTOM_KEY) {
+            "自定义 ${settings.customWallpaperWidth}x${settings.customWallpaperHeight}"
+        } else {
+            BooxDevicePresets.byKey(settings.booxDevicePreset).displayText()
+        }
     }
 
     private fun buildSettingsPage(prefs: android.content.SharedPreferences): View {
@@ -926,8 +979,8 @@ class MainActivity : ComponentActivity() {
             setPadding(0, 0, 0, 40)
         })
 
-        val periodOptions = listOf(4000 to "当天\n只看今天", 4006 to "昨天\n只看昨日", 4001 to "本周\n周视图", 4002 to "上周\n回看上周", 4003 to "最近7天\n滚动7天", 4004 to "最近30天\n月度概览", 4005 to "自定义起止\n手动选日期")
-        val periodNames = listOf(PeriodMode.TODAY.name, PeriodMode.YESTERDAY.name, PeriodMode.THIS_WEEK.name, PeriodMode.LAST_WEEK.name, PeriodMode.LAST_7_DAYS.name, PeriodMode.LAST_30_DAYS.name, PeriodMode.CUSTOM.name)
+        val periodOptions = listOf(4000 to "当天\n只看今天", 4006 to "昨天\n只看昨日", 4001 to "本周\n周视图", 4002 to "上周\n回看上周", 4007 to "本月\n自然月历", 4003 to "最近7天\n滚动7天", 4004 to "最近30天\n月度概览", 4005 to "自定义起止\n手动选日期")
+        val periodNames = listOf(PeriodMode.TODAY.name, PeriodMode.YESTERDAY.name, PeriodMode.THIS_WEEK.name, PeriodMode.LAST_WEEK.name, PeriodMode.THIS_MONTH.name, PeriodMode.LAST_7_DAYS.name, PeriodMode.LAST_30_DAYS.name, PeriodMode.CUSTOM.name)
         val savedPeriod = prefs.getString("period_mode", PeriodMode.THIS_WEEK.name) ?: PeriodMode.THIS_WEEK.name
         periodGroup = makeRadioGroup(periodOptions, selectedId(savedPeriod, 4001, periodOptions, periodNames))
 
@@ -943,18 +996,34 @@ class MainActivity : ComponentActivity() {
             1201 to "统计壁纸\n生成阅读账单图片",
             1202 to "当前阅读封面\n使用当前来源的最近封面",
             1203 to "自动封面优先\n有封面用封面，否则用账单",
-            1204 to "月历封面墙\n按天堆叠本地阅读封面"
+            1204 to "月历封面墙\n按天展示所选来源数据"
         )
         val wallpaperNames = listOf("STATS", "COVER", "AUTO_COVER", "CALENDAR")
         wallpaperModeGroup = makeRadioGroup(wallpaperOptions, selectedId(prefs.getString("wallpaper_mode", "STATS") ?: "STATS", 1201, wallpaperOptions, wallpaperNames))
 
+        val calendarStackOrderOptions = listOf(
+            1221 to "阅读最长在最上\n突出当天主要阅读",
+            1222 to "阅读最短在最上\n突出短时翻阅书籍",
+            1223 to "最近打开在最上\n突出当天最后阅读"
+        )
+        val calendarStackOrderNames = listOf("LONGEST_TOP", "SHORTEST_TOP", "LATEST_TOP")
+        calendarStackOrderGroup = makeRadioGroup(
+            calendarStackOrderOptions,
+            selectedId(
+                prefs.getString("calendar_stack_order", "LONGEST_TOP") ?: "LONGEST_TOP",
+                1221,
+                calendarStackOrderOptions,
+                calendarStackOrderNames
+            )
+        )
+
         val matchedBooxPreset = detectBooxDevicePresetOrNull()
         val detectedBooxPreset = matchedBooxPreset ?: BooxDevicePresets.DEFAULT_KEY
-        val booxDevicePresetOptions = BooxDevicePresets.all.mapIndexed { index, preset ->
+        val booxDevicePresetOptions = listOf(1301 to "自定义分辨率\n手动输入宽度和高度") + BooxDevicePresets.all.mapIndexed { index, preset ->
             val matchMark = if (matchedBooxPreset != null && preset.key == matchedBooxPreset) " [本机匹配]" else ""
-            (1301 + index) to "${preset.label}$matchMark\n${preset.inchText} ${preset.heightPx}x${preset.widthPx}"
+            (1302 + index) to "${preset.label}$matchMark\n${preset.inchText} ${preset.heightPx}x${preset.widthPx}"
         }
-        val booxDevicePresetNames = BooxDevicePresets.all.map { it.key }
+        val booxDevicePresetNames = listOf(BooxDevicePresets.CUSTOM_KEY) + BooxDevicePresets.all.map { it.key }
         val hasManualBooxPreset = prefs.getBoolean("boox_device_preset_user_set", false)
         val defaultBooxDevicePreset = if (hasManualBooxPreset && prefs.contains("boox_device_preset")) {
             prefs.getString("boox_device_preset", BooxDevicePresets.DEFAULT_KEY) ?: BooxDevicePresets.DEFAULT_KEY
@@ -1027,6 +1096,9 @@ class MainActivity : ComponentActivity() {
         showBookDurationCheck = makeCheck(prefs.getBoolean("show_book_duration", true))
         showChartCheck = makeCheck(prefs.getBoolean("show_chart", true))
         showPeakLabelCheck = makeCheck(prefs.getBoolean("show_peak_label", true))
+        readingDataStoreCheck = makeCheck(
+            prefs.getBoolean(AutoRefreshConfig.KEY_READING_DATA_STORE_ENABLED, false)
+        )
         autoRefreshCheck = makeCheck(prefs.getBoolean(AutoRefreshConfig.KEY_AUTO_ENABLED, true))
 
         minDurationInput = makeInput(prefs.getInt("min_duration_minutes", 1).toString())
@@ -1036,6 +1108,8 @@ class MainActivity : ComponentActivity() {
         bodySizeInput = makeInput((prefs.getFloat("receipt_body_size", 34f)).toInt().toString())
         serialCustomInput = makeInput(prefs.getString("serial_number_custom", "") ?: "")
         serialNumberSizeInput = makeInput((prefs.getFloat("serial_number_size", 46f)).toInt().toString())
+        customWallpaperWidthInput = makeInput(prefs.getInt("custom_wallpaper_width", BooxDevicePresets.byKey(defaultBooxDevicePreset).widthPx).coerceIn(300, 4000).toString())
+        customWallpaperHeightInput = makeInput(prefs.getInt("custom_wallpaper_height", BooxDevicePresets.byKey(defaultBooxDevicePreset).heightPx).coerceIn(300, 4000).toString())
         noteInput = makeInput(prefs.getString("note_text", "") ?: "")
         yAxisMaxInput = makeInput(prefs.getInt("y_axis_fixed_max_minutes", 300).toString())
         autoDailyTimeInput = makeInput(prefs.getString(AutoRefreshConfig.KEY_DAILY_TIME, "22:30") ?: "22:30")
@@ -1046,15 +1120,27 @@ class MainActivity : ComponentActivity() {
         root.addView(hiddenHost)
 
         addSectionTitle("数据与统计", "周期、数据来源、设备尺寸与时长单位")
+        bindToggle("启用阅读数据落库", readingDataStoreCheck)
+        addHint("说明：默认关闭以降低低性能墨水屏设备的历史扫描、封面缓存和数据库写入开销。开启后会在启动、解锁或定时任务中维护 Neo 与微信读书日级记录，供微信/混合月历持续积累历史；关闭不会删除已有数据，Neo 月历仍可实时读取，微信和混合月历只能手动查看已有缓存，自动任务会保留现有壁纸。")
         val booxDevicePresetRow = bindRadioChoiceRow("阅读器尺寸预设", booxDevicePresetGroup, booxDevicePresetOptions)
         appendUiDebug("buildSettingsPage added booxDevicePresetRow rootChildCount=${root.childCount} rowChildren=${booxDevicePresetRow.childCount}")
         addHint("说明：首次会根据本机型号自动匹配；匹配不到时默认 Leaf5。这个选项会影响预览和生成壁纸的图片分辨率。")
+        val customWidthRow = bindEditRow("自定义宽度(px)", customWallpaperWidthInput, numericOnly = true, maxDigits = 4)
+        val customHeightRow = bindEditRow("自定义高度(px)", customWallpaperHeightInput, numericOnly = true, maxDigits = 4)
+        addHint("说明：只有选择“自定义分辨率”时生效。请填写最终壁纸图片的宽和高，例如 P6 Pro 竖屏常用 824 x 1648。")
         val periodSegment = bindSegmented("统计周期", periodGroup, periodOptions, isVertical = false)
-        addHint("说明：选择账单统计哪一段时间；自定义模式会显示起止日期选择。")
+        addHint("说明：选择账单统计哪一段时间；自定义模式会显示起止日期选择。月历封面墙复用这个周期：选择“本月”时显示当前自然月；选择“最近30天”或其它周期时，会显示该周期结束日期所在月份的月历。")
         val sourceSegment = bindSegmented("数据来源", sourceGroup, sourceOptions, isVertical = true)
         addHint("说明：Neo 阅读器读取文石本地数据库，适合离线使用；微信读书需要联网读取 API；混合来源会把本地和微信的统计时长相加，书单按阅读时长合并排序，封面按最近阅读来源选择，失败时回退另一来源。混合来源包含联网数据，因此自动模式下不会在熄屏瞬间请求网络，而是在解锁后刷新，通常下一次锁屏看到新图；如果微信读书读取失败，会继续使用本地数据。")
         val wallpaperModeSegment = bindSegmented("壁纸类型", wallpaperModeGroup, wallpaperOptions, isVertical = true)
-        val wallpaperModeHint = addHint("说明：统计壁纸生成阅读账单；当前阅读封面会按所选数据来源取最近书籍封面，Neo 阅读器只读本地封面，微信读书会联网获取并缓存封面；自动封面优先会先尝试封面，失败时回退到账单；月历封面墙目前使用 Neo 阅读器本地阅读事件生成月视图，由于部分设备的统计事件不带书籍路径，会按阅读时间和书库最近访问时间做近似匹配。提示：Neo 封面依赖本地元数据落库，通常退出当前书籍后再锁屏更容易刷新；微信封面在解锁后生成，通常下一次锁屏显示最新结果。")
+        val wallpaperModeHint = addHint("说明：统计壁纸生成阅读账单；当前阅读封面会按所选数据来源取最近书籍封面，Neo 阅读器只读本地封面，微信读书会联网获取并缓存封面；自动封面优先会先尝试封面，失败时回退到账单；月历封面墙按所选来源读取数据，Neo 使用本地阅读事件，微信读书使用精确每日总时长和快照差分确认的日级书籍。提示：Neo 封面依赖 NeoReader 自身写入本地元数据，通常退出当前书籍后再锁屏更容易刷新；微信数据在解锁后生成，通常下一次锁屏显示最新结果。")
+        val calendarStackOrderSegment = bindSegmented(
+            "月历封面堆叠顺序",
+            calendarStackOrderGroup,
+            calendarStackOrderOptions,
+            isVertical = true
+        )
+        val calendarStackOrderHint = addHint("说明：控制每日封面堆叠中最上方显示哪本书；最多仍显示4本，不改变每日阅读时长统计。")
         val coverFitSegment = bindSegmented("封面显示方式", coverFitModeGroup, coverFitOptions, isVertical = false)
         val timeUnitSegment = bindSegmented("时长显示单位", timeUnitGroup, timeUnitOptions, isVertical = false)
         addHint("说明：小时模式更适合壁纸阅读，分钟模式更适合精确核对。")
@@ -1250,9 +1336,15 @@ class MainActivity : ComponentActivity() {
             val customPeriod = periodGroup.checkedRadioButtonId == 4005
             weekStartRow.visibility = if (customPeriod) View.VISIBLE else View.GONE
             weekEndRow.visibility = if (customPeriod) View.VISIBLE else View.GONE
+            val customSize = booxPresetKeyByRadioId(booxDevicePresetGroup.checkedRadioButtonId) == BooxDevicePresets.CUSTOM_KEY
+            customWidthRow.visibility = if (customSize) View.VISIBLE else View.GONE
+            customHeightRow.visibility = if (customSize) View.VISIBLE else View.GONE
 
             val coverOptsVisible = wallpaperModeGroup.checkedRadioButtonId == 1202 || wallpaperModeGroup.checkedRadioButtonId == 1203
             coverFitSegment.visibility = if (coverOptsVisible) View.VISIBLE else View.GONE
+            val calendarVisible = wallpaperModeGroup.checkedRadioButtonId == 1204
+            calendarStackOrderSegment.visibility = if (calendarVisible) View.VISIBLE else View.GONE
+            calendarStackOrderHint.visibility = if (calendarVisible) View.VISIBLE else View.GONE
 
             serialCustomRow.visibility = if (serialModeGroup.checkedRadioButtonId == 2013) View.VISIBLE else View.GONE
 
@@ -1282,10 +1374,22 @@ class MainActivity : ComponentActivity() {
         yAxisModeGroup.setOnCheckedChangeListener { _, _ -> updateConditionalVisibility(); if (!isInitializingUi) applySettingsPreview() }
         footerModeGroup.setOnCheckedChangeListener { _, _ -> updateConditionalVisibility(); if (!isInitializingUi) applySettingsPreview() }
         autoRefreshCheck.setOnCheckedChangeListener { _, _ -> updateConditionalVisibility(); if (!isInitializingUi) applySettingsPreview() }
+        readingDataStoreCheck.setOnCheckedChangeListener { _, enabled ->
+            if (!isInitializingUi) {
+                getSharedPreferences(AutoRefreshConfig.PREFS_NAME, Context.MODE_PRIVATE)
+                    .edit()
+                    .putBoolean(AutoRefreshConfig.KEY_READING_DATA_STORE_ENABLED, enabled)
+                    .apply()
+                applySettingsPreview()
+                if (enabled) startReadingStoreBootstrapIfNeeded()
+            }
+        }
         autoModeGroup.setOnCheckedChangeListener { _, _ -> updateConditionalVisibility(); if (!isInitializingUi) applySettingsPreview() }
         serialModeGroup.setOnCheckedChangeListener { _, _ -> updateConditionalVisibility(); if (!isInitializingUi) applySettingsPreview() }
         wallpaperModeGroup.setOnCheckedChangeListener { _, _ -> updateConditionalVisibility(); if (!isInitializingUi) applySettingsPreview() }
+        calendarStackOrderGroup.setOnCheckedChangeListener { _, _ -> if (!isInitializingUi) applySettingsPreview() }
         booxDevicePresetGroup.setOnCheckedChangeListener { _, _ ->
+            updateConditionalVisibility()
             if (!isInitializingUi) {
                 getSharedPreferences("wallpaper_settings", Context.MODE_PRIVATE)
                     .edit()
@@ -1405,6 +1509,20 @@ class MainActivity : ComponentActivity() {
             }
             override fun afterTextChanged(s: Editable?) {}
         })
+        customWallpaperWidthInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                if (!isInitializingUi) applySettingsPreview()
+            }
+            override fun afterTextChanged(s: Editable?) {}
+        })
+        customWallpaperHeightInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                if (!isInitializingUi) applySettingsPreview()
+            }
+            override fun afterTextChanged(s: Editable?) {}
+        })
         yAxisMaxInput.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
@@ -1433,7 +1551,7 @@ class MainActivity : ComponentActivity() {
         saveSettings(settings)
         saveAndApplyAutoRefreshSettings()
         if (settings.sourceMode == DataSourceMode.WEREAD || settings.sourceMode == DataSourceMode.MIXED) {
-            previewPresetText = BooxDevicePresets.byKey(settings.booxDevicePreset).displayText()
+            previewPresetText = wallpaperSizeDisplayText(settings)
             val label = if (settings.sourceMode == DataSourceMode.MIXED) "混合来源" else "微信读书来源"
             statusText.text = "$label 已保存\n请点击“刷新预览”或“生成壁纸”获取最新内容。"
             changeStateText.text = "状态: $label 参数已变更（未联网）｜尺寸: $previewPresetText"
@@ -1443,7 +1561,7 @@ class MainActivity : ComponentActivity() {
         }
         val (bmp, result) = renderWallpaperPreview(settings)
         previewBitmap = bmp
-        previewPresetText = BooxDevicePresets.byKey(settings.booxDevicePreset).displayText()
+        previewPresetText = wallpaperSizeDisplayText(settings)
         statusText.text = "预览已更新（未写入文件）\n$result"
         changeStateText.text = "状态: 参数已变更（仅预览）｜尺寸: $previewPresetText"
         refreshPreview()
@@ -1515,7 +1633,7 @@ class MainActivity : ComponentActivity() {
         saveAndApplyAutoRefreshSettings()
         val (bmp, result) = renderWallpaperPreview(settings)
         previewBitmap = bmp
-        previewPresetText = BooxDevicePresets.byKey(settings.booxDevicePreset).displayText()
+        previewPresetText = wallpaperSizeDisplayText(settings)
         val saved = saveBitmapToPictures(bmp)
         lastSavedPath = saved
         statusText.text = "已生成并覆盖文件\n$result\n路径: $saved"
@@ -1683,6 +1801,7 @@ class MainActivity : ComponentActivity() {
             PeriodMode.YESTERDAY -> "昨天"
             PeriodMode.THIS_WEEK -> "本周"
             PeriodMode.LAST_WEEK -> "上周"
+            PeriodMode.THIS_MONTH -> "本月"
             PeriodMode.LAST_7_DAYS -> "最近7天"
             PeriodMode.LAST_30_DAYS -> "最近30天"
             PeriodMode.CUSTOM -> "自定义周期"
@@ -1752,7 +1871,7 @@ class MainActivity : ComponentActivity() {
                 isTestingWeRead = false
                 if (preview != null) {
                     previewBitmap = preview.bitmap
-                    previewPresetText = BooxDevicePresets.byKey(readSettingsFromUi().booxDevicePreset).displayText()
+                    previewPresetText = wallpaperSizeDisplayText(readSettingsFromUi())
                     statusText.text = "${sourceLabel}预览已更新（未写入文件）\n${preview.summary}"
                     changeStateText.text = "状态: ${sourceLabel}预览已更新｜尺寸: $previewPresetText"
                     lastWeReadWallpaperDebug = "ok=true, period=$periodLabel, summary=${preview.summary}"
@@ -1791,7 +1910,7 @@ class MainActivity : ComponentActivity() {
                     val saved = saveBitmapToPictures(preview.bitmap)
                     previewBitmap = preview.bitmap
                     lastSavedPath = saved
-                    previewPresetText = BooxDevicePresets.byKey(readSettingsFromUi().booxDevicePreset).displayText()
+                    previewPresetText = wallpaperSizeDisplayText(readSettingsFromUi())
                     statusText.text = "${sourceLabel}壁纸已生成并覆盖文件\n${preview.summary}\n路径: $saved"
                     changeStateText.text = "状态: ${sourceLabel}壁纸已生成并保存｜尺寸: $previewPresetText"
                     lastWeReadWallpaperDebug = "ok=true, period=$periodLabel, saved=$saved, summary=${preview.summary}"
@@ -1815,7 +1934,7 @@ class MainActivity : ComponentActivity() {
             "COVER" -> AutoWallpaperGenerator.buildWeReadCoverPreviewFromPrefs(applicationContext, "W")
             "AUTO_COVER" -> AutoWallpaperGenerator.buildWeReadCoverPreviewFromPrefs(applicationContext, "W")
                 ?: AutoWallpaperGenerator.buildWeReadStatsPreviewFromPrefs(applicationContext, "W")
-            "CALENDAR" -> AutoWallpaperGenerator.buildLocalCalendarPreviewFromPrefs(applicationContext, "M")
+            "CALENDAR" -> AutoWallpaperGenerator.buildWeReadCalendarPreviewFromPrefs(applicationContext, "W")
             else -> AutoWallpaperGenerator.buildWeReadStatsPreviewFromPrefs(applicationContext, "W")
         }
     }
@@ -2181,6 +2300,7 @@ class MainActivity : ComponentActivity() {
             4000 -> PeriodMode.TODAY
             4006 -> PeriodMode.YESTERDAY
             4002 -> PeriodMode.LAST_WEEK
+            4007 -> PeriodMode.THIS_MONTH
             4003 -> PeriodMode.LAST_7_DAYS
             4004 -> PeriodMode.LAST_30_DAYS
             4005 -> PeriodMode.CUSTOM
@@ -2204,6 +2324,11 @@ class MainActivity : ComponentActivity() {
             1204 -> "CALENDAR"
             else -> "STATS"
         }
+        val calendarStackOrder = when (calendarStackOrderGroup.checkedRadioButtonId) {
+            1222 -> "SHORTEST_TOP"
+            1223 -> "LATEST_TOP"
+            else -> "LONGEST_TOP"
+        }
         val coverFitMode = when (coverFitModeGroup.checkedRadioButtonId) {
             1212 -> "CROP"
             else -> "FIT"
@@ -2225,6 +2350,9 @@ class MainActivity : ComponentActivity() {
         val serialNumberCustom = serialNumberCustomRaw.filter { it.isDigit() }.take(12)
         val serialNumberSize = serialNumberSizeInput.text.toString().trim().toFloatOrNull()?.coerceIn(24f, 140f) ?: 46f
         val booxDevicePreset = booxPresetKeyByRadioId(booxDevicePresetGroup.checkedRadioButtonId)
+        val fallbackPreset = BooxDevicePresets.byKey(if (booxDevicePreset == BooxDevicePresets.CUSTOM_KEY) BooxDevicePresets.DEFAULT_KEY else booxDevicePreset)
+        val customWallpaperWidth = customWallpaperWidthInput.text.toString().trim().toIntOrNull()?.coerceIn(300, 4000) ?: fallbackPreset.widthPx
+        val customWallpaperHeight = customWallpaperHeightInput.text.toString().trim().toIntOrNull()?.coerceIn(300, 4000) ?: fallbackPreset.heightPx
         val receiptTitle = titleInput.text.toString().ifBlank { "阅读账单" }
         val receiptTitleSize = titleSizeInput.text.toString().trim().toFloatOrNull()?.coerceIn(24f, 120f) ?: 74f
         val receiptBodySize = bodySizeInput.text.toString().trim().toFloatOrNull()?.coerceIn(18f, 60f) ?: 34f
@@ -2256,7 +2384,7 @@ class MainActivity : ComponentActivity() {
         }
         val titleFont = fontSpec(titleFontSpinner.selectedItem?.toString() ?: "SERIF_BOLD")
         val bodyFont = fontSpec(bodyFontSpinner.selectedItem?.toString() ?: "MONO")
-        return Settings(includeUnread, showChart, showProgressStatus, showAuthor, showBookDuration, minDurationMinutes, topN, weekStart, weekEnd, periodMode, readingFilterMode, sourceMode, wallpaperMode, coverFitMode, progressMode, timeUnit, receiptTitle, receiptTitleSize, receiptBodySize, serialNumberMode, serialNumberCustom, serialNumberSize, booxDevicePreset, footerMode, barcodeWidthScale, barcodeGapMode, noteText, chartStyleMode, showPeakLabel, yAxisMode, yAxisFixedMaxMinutes, titleFont, bodyFont)
+        return Settings(includeUnread, showChart, showProgressStatus, showAuthor, showBookDuration, minDurationMinutes, topN, weekStart, weekEnd, periodMode, readingFilterMode, sourceMode, wallpaperMode, calendarStackOrder, coverFitMode, progressMode, timeUnit, receiptTitle, receiptTitleSize, receiptBodySize, serialNumberMode, serialNumberCustom, serialNumberSize, booxDevicePreset, customWallpaperWidth, customWallpaperHeight, footerMode, barcodeWidthScale, barcodeGapMode, noteText, chartStyleMode, showPeakLabel, yAxisMode, yAxisFixedMaxMinutes, titleFont, bodyFont)
     }
 
     private fun saveSettings(settings: Settings) {
@@ -2275,6 +2403,7 @@ class MainActivity : ComponentActivity() {
             .putString("reading_filter_mode", settings.readingFilterMode.name)
             .putString("source_mode", settings.sourceMode.name)
             .putString("wallpaper_mode", settings.wallpaperMode)
+            .putString("calendar_stack_order", settings.calendarStackOrder)
             .putString("cover_fit_mode", settings.coverFitMode)
             .putString("progress_mode", settings.progressMode)
             .putString("time_unit", settings.timeUnit)
@@ -2285,12 +2414,18 @@ class MainActivity : ComponentActivity() {
             .putString("serial_number_custom", settings.serialNumberCustom)
             .putFloat("serial_number_size", settings.serialNumberSize)
             .putString("boox_device_preset", settings.booxDevicePreset)
+            .putInt("custom_wallpaper_width", settings.customWallpaperWidth)
+            .putInt("custom_wallpaper_height", settings.customWallpaperHeight)
             .putString("footer_mode", settings.footerMode)
             .putFloat("barcode_width_scale", settings.barcodeWidthScale)
             .putString("barcode_gap_mode", settings.barcodeGapMode)
             .putString("note_text", settings.noteText)
             .putString("chart_style_mode", settings.chartStyleMode.name)
             .putBoolean("show_peak_label", settings.showPeakLabel)
+            .putBoolean(
+                AutoRefreshConfig.KEY_READING_DATA_STORE_ENABLED,
+                readingDataStoreCheck.isChecked
+            )
             .putString("y_axis_mode", settings.yAxisMode.name)
             .putInt("y_axis_fixed_max_minutes", settings.yAxisFixedMaxMinutes)
             .putString("title_font", settings.titleFont)
@@ -2478,6 +2613,7 @@ class MainActivity : ComponentActivity() {
                     .append(", showBookDuration=").append(s.showBookDuration.toString())
                     .append(", minDuration=").append(s.minDurationMinutes.toString())
                     .append(", topN=").append(s.topN.toString())
+                    .append(", readingDataStoreEnabled=").append(readingDataStoreCheck.isChecked.toString())
                     .append(", sourceMode=").append(s.sourceMode.name)
                     .append(", wallpaperMode=").append(s.wallpaperMode)
                     .append(", coverFitMode=").append(s.coverFitMode)
@@ -2490,6 +2626,8 @@ class MainActivity : ComponentActivity() {
                     .append(", serialNumberCustom=").append(s.serialNumberCustom)
                     .append(", serialNumberSize=").append(s.serialNumberSize.toString())
                     .append(", booxDevicePreset=").append(s.booxDevicePreset)
+                    .append(", customWallpaperWidth=").append(s.customWallpaperWidth.toString())
+                    .append(", customWallpaperHeight=").append(s.customWallpaperHeight.toString())
                     .append(", footerMode=").append(s.footerMode)
                     .append(", noteText=").append(s.noteText)
                     .append(", titleFont=").append(s.titleFont)

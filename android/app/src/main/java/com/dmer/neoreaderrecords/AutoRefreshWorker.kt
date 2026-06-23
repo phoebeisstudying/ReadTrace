@@ -22,13 +22,36 @@ class AutoRefreshWorker(context: Context, params: WorkerParameters) : Worker(con
         val wallpaperMode = prefs.getString("wallpaper_mode", "STATS") ?: "STATS"
         val sourceMode = prefs.getString("source_mode", "DURATION") ?: "DURATION"
         AutoRefreshLog.i(applicationContext, "Worker config sourceMode=$sourceMode wallpaperMode=$wallpaperMode")
+        if (
+            wallpaperMode == "CALENDAR" &&
+            (sourceMode == "WEREAD" || sourceMode == "MIXED") &&
+            !AutoRefreshConfig.isReadingDataStoreEnabled(applicationContext)
+        ) {
+            AutoRefreshLog.i(
+                applicationContext,
+                "Worker skip remote calendar: reading data store disabled source=$sourceMode"
+            )
+            return Result.success()
+        }
+        if (wallpaperMode != "CALENDAR") {
+            val storeSyncOk = AutoWallpaperGenerator.syncRecentNeoReadingStore(
+                applicationContext,
+                "worker_$reason"
+            )
+            AutoRefreshLog.i(applicationContext, "Worker reading store sync ok=$storeSyncOk reason=$reason")
+        } else {
+            AutoRefreshLog.i(applicationContext, "Worker reading store sync delegated to calendar generation")
+        }
         val now = System.currentTimeMillis()
         val minIntervalMs = AutoRefreshConfig.minIntervalMinutes(applicationContext) * 60_000L
         val lastMs = prefs.getLong(AutoRefreshConfig.KEY_LAST_TRIGGER_MS, 0L)
         val delta = now - lastMs
 
         if (sourceMode == "WEREAD" || sourceMode == "MIXED") {
-            if (reason != "screen_on_prewarm" && reason != "user_present_prewarm") {
+            val remoteAllowed = reason == "screen_on_prewarm" ||
+                reason == "user_present_prewarm" ||
+                reason == "daily_alarm"
+            if (!remoteAllowed) {
                 AutoRefreshLog.i(applicationContext, "Worker skip remote source=$sourceMode on reason=$reason")
                 return Result.success()
             }

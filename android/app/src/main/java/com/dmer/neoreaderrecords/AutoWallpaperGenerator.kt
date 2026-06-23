@@ -31,6 +31,11 @@ object AutoWallpaperGenerator {
     private val metadataUri = Uri.parse("content://com.onyx.content.database.ContentProvider/Metadata")
     private val statsUri = Uri.parse("content://com.onyx.kreader.statistics.provider/OnyxStatisticsModel")
     private const val DAY_MS = 86_400_000L
+    private const val READING_STORE_SYNC_MIN_INTERVAL_MS = 60_000L
+    private const val READING_STORE_SYNC_LOOKBACK_DAYS = 3
+    private const val KEY_READING_STORE_LAST_SYNC_ATTEMPT_MS = "reading_store_last_sync_attempt_ms"
+    private const val KEY_READING_STORE_LAST_SYNC_SUCCESS_MS = "reading_store_last_sync_success_ms"
+    private val readingStoreSyncLock = Any()
 
     private data class BookItem(
         val title: String,
@@ -51,6 +56,7 @@ object AutoWallpaperGenerator {
         val path: String,
         val status: Int,
         val durationMs: Long,
+        val lastSeenAt: Long,
         val bitmap: Bitmap?
     )
     private data class CalendarDayCell(
@@ -60,7 +66,8 @@ object AutoWallpaperGenerator {
         val totalMs: Long,
         val eventCount: Int,
         val unmatchedCount: Int,
-        val books: List<CalendarCoverItem>
+        val books: List<CalendarCoverItem>,
+        val sourceKind: String = "NEO"
     )
     private data class CalendarBuildData(
         val monthStartMs: Long,
@@ -69,9 +76,20 @@ object AutoWallpaperGenerator {
         val cells: List<CalendarDayCell>,
         val statsRows: Int,
         val matchedRows: Int,
-        val unmatchedRows: Int
+        val unmatchedRows: Int,
+        val footerLabel: String = "Neo 本地月历 · 近似匹配",
+        val showDurationOnlyLabel: Boolean = true,
+        val showFooterLabel: Boolean = true,
+        val showDaySourceLabel: Boolean = false
+    )
+    private data class CalendarMonthFrame(
+        val monthStart: Long,
+        val monthEnd: Long,
+        val weekRows: Int,
+        val gridStart: Long
     )
     private data class ChartStats(val totalMs: Long, val points: LongArray, val labels: List<String>)
+    private data class WallpaperSize(val label: String, val width: Int, val height: Int)
     private data class WeReadBuildData(
         val rangeStart: Long,
         val rangeEnd: Long,
@@ -96,6 +114,7 @@ object AutoWallpaperGenerator {
         val readingFilterMode: String,
         val sourceMode: String,
         val wallpaperMode: String,
+        val calendarStackOrder: String,
         val coverFitMode: String,
         val progressMode: String,
         val timeUnit: String,
@@ -106,6 +125,8 @@ object AutoWallpaperGenerator {
         val serialNumberCustom: String,
         val serialNumberSize: Float,
         val booxDevicePreset: String,
+        val customWallpaperWidth: Int,
+        val customWallpaperHeight: Int,
         val footerMode: String,
         val barcodeWidthScale: Float,
         val barcodeGapMode: String,
@@ -148,10 +169,11 @@ object AutoWallpaperGenerator {
         AutoRefreshLog.i(context, "WeRead auto generator start reason=$reason")
         return runCatching {
             val s = readSettings(context)
+            if (s.wallpaperMode != "STATS" && s.wallpaperMode != "CALENDAR") {
+                WeReadReadingSync.syncCurrentMonth(context, "weread_auto_$reason")
+            }
             val built = buildWeReadPreviewForWallpaperMode(context, s.wallpaperMode) ?: return false
-            if ((reason.startsWith("screen_on_prewarm") || reason.startsWith("user_present_prewarm")) &&
-                built.summary.contains("source=fallback_cache")
-            ) {
+            if (built.summary.contains("source=fallback_cache")) {
                 AutoRefreshLog.i(context, "WeRead auto skip saving fallback cache and request retry ${built.summary}")
                 return false
             }
@@ -167,6 +189,10 @@ object AutoWallpaperGenerator {
     fun generateAndSaveMixed(context: Context, reason: String): Boolean {
         AutoRefreshLog.i(context, "Mixed auto generator start reason=$reason")
         return runCatching {
+            val settings = readSettings(context)
+            if (settings.wallpaperMode != "STATS" && settings.wallpaperMode != "CALENDAR") {
+                WeReadReadingSync.syncCurrentMonth(context, "mixed_auto_$reason")
+            }
             val built = buildMixedPreviewFromPrefs(context, "A") ?: return false
             if ((reason.startsWith("screen_on_prewarm") || reason.startsWith("user_present_prewarm")) &&
                 built.summary.contains("source=fallback_cache")
@@ -185,6 +211,112 @@ object AutoWallpaperGenerator {
 
     fun buildPreviewFromPrefs(context: Context, sourceMark: String = "M"): PreviewResult? {
         return runCatching { buildPreviewInternal(context, sourceMark, false) }.getOrNull()
+    }
+
+    fun bootstrapReadingStoreIfNeeded(context: Context): Boolean {
+        if (!AutoRefreshConfig.isReadingDataStoreEnabled(context)) {
+            AutoRefreshLog.i(context, "ReadingDataStore bootstrap skip disabled")
+            return true
+        }
+        return runCatching {
+            val bootstrapSettings = readSettings(context).copy(
+                sourceMode = "DURATION",
+                periodMode = "THIS_MONTH"
+            )
+            val now = System.currentTimeMillis()
+            val monthBases = linkedSetOf(now)
+            val recentStart = Calendar.getInstance(TimeZone.getDefault()).apply {
+                timeInMillis = now
+                add(Calendar.DAY_OF_MONTH, -29)
+            }.timeInMillis
+            if (!isSameMonth(now, recentStart)) {
+                monthBases.add(recentStart)
+            }
+
+            var months = 0
+            monthBases.forEach { baseMs ->
+                val frame = calendarMonthFrame(baseMs)
+                val data = buildLiveNeoCalendarData(
+                    context = context,
+                    s = bootstrapSettings,
+                    monthStart = frame.monthStart,
+                    monthEnd = frame.monthEnd,
+                    weekRows = frame.weekRows,
+                    gridStart = frame.gridStart
+                )
+                if (data != null) months += 1
+            }
+            AutoRefreshLog.i(
+                context,
+                "ReadingDataStore bootstrap done months=$months totalDb=${ReadingDataStore.countDailyBooks(context)}"
+            )
+            true
+        }.getOrElse {
+            AutoRefreshLog.e(context, "ReadingDataStore bootstrap failed", it)
+            false
+        }
+    }
+
+    fun syncRecentNeoReadingStore(context: Context, reason: String): Boolean {
+        if (!AutoRefreshConfig.isReadingDataStoreEnabled(context)) {
+            AutoRefreshLog.i(context, "ReadingDataStore incremental skip disabled reason=$reason")
+            return true
+        }
+        return synchronized(readingStoreSyncLock) {
+            val prefs = context.getSharedPreferences(AutoRefreshConfig.PREFS_NAME, Context.MODE_PRIVATE)
+            val now = System.currentTimeMillis()
+            val lastAttempt = prefs.getLong(KEY_READING_STORE_LAST_SYNC_ATTEMPT_MS, 0L)
+            val delta = now - lastAttempt
+            if (delta in 0 until READING_STORE_SYNC_MIN_INTERVAL_MS) {
+                AutoRefreshLog.i(
+                    context,
+                    "ReadingDataStore incremental skip reason=$reason delta=${delta}ms"
+                )
+                return@synchronized true
+            }
+            prefs.edit().putLong(KEY_READING_STORE_LAST_SYNC_ATTEMPT_MS, now).apply()
+
+            runCatching {
+                val end = Calendar.getInstance(TimeZone.getDefault()).apply {
+                    timeInMillis = now
+                    set(Calendar.HOUR_OF_DAY, 23)
+                    set(Calendar.MINUTE, 59)
+                    set(Calendar.SECOND, 59)
+                    set(Calendar.MILLISECOND, 999)
+                }.timeInMillis
+                val start = Calendar.getInstance(TimeZone.getDefault()).apply {
+                    timeInMillis = now
+                    add(Calendar.DAY_OF_MONTH, -(READING_STORE_SYNC_LOOKBACK_DAYS - 1))
+                    set(Calendar.HOUR_OF_DAY, 0)
+                    set(Calendar.MINUTE, 0)
+                    set(Calendar.SECOND, 0)
+                    set(Calendar.MILLISECOND, 0)
+                }.timeInMillis
+                val settings = readSettings(context).copy(
+                    sourceMode = "DURATION",
+                    periodMode = "CUSTOM",
+                    weekStart = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date(start)),
+                    weekEnd = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date(end))
+                )
+                val data = buildLiveNeoCalendarData(
+                    context = context,
+                    s = settings,
+                    monthStart = start,
+                    monthEnd = end,
+                    weekRows = 1,
+                    gridStart = start
+                )
+                prefs.edit().putLong(KEY_READING_STORE_LAST_SYNC_SUCCESS_MS, now).apply()
+                AutoRefreshLog.i(
+                    context,
+                    "ReadingDataStore incremental done reason=$reason range=${fmt(start)}~${fmt(end)} rows=${data?.statsRows ?: 0} totalDb=${ReadingDataStore.countDailyBooks(context)}"
+                )
+                true
+            }.getOrElse {
+                AutoRefreshLog.e(context, "ReadingDataStore incremental failed reason=$reason", it)
+                false
+            }
+        }
     }
 
     fun buildWeReadStatsPreviewFromPrefs(context: Context, sourceMark: String = "W"): PreviewResult? {
@@ -256,11 +388,19 @@ object AutoWallpaperGenerator {
         }.getOrNull()
     }
 
+    fun buildWeReadCalendarPreviewFromPrefs(context: Context, sourceMark: String = "W"): PreviewResult? {
+        return runCatching {
+            val syncOk = WeReadReadingSync.syncCurrentMonth(context, "calendar_preview")
+            val s = readSettings(context)
+            buildWeReadCalendarPreviewForSettings(context, s, sourceMark, syncOk)
+        }.getOrNull()
+    }
+
     fun buildMixedPreviewFromPrefs(context: Context, sourceMark: String = "A"): PreviewResult? {
         return runCatching {
             val s = readSettings(context)
             if (s.wallpaperMode == "CALENDAR") {
-                return@runCatching buildLocalCalendarPreviewForSettings(context, s, "M")
+                return@runCatching buildMixedCalendarPreviewForSettings(context, s, sourceMark)
             }
             val tryCover = s.wallpaperMode == "COVER" || s.wallpaperMode == "AUTO_COVER"
             if (tryCover) {
@@ -279,12 +419,146 @@ object AutoWallpaperGenerator {
         }.getOrNull()
     }
 
+    private fun buildMixedCalendarPreviewForSettings(
+        context: Context,
+        s: AutoSettings,
+        sourceMark: String
+    ): PreviewResult? {
+        val range = resolvePeriodRange(s)
+        val frame = calendarFrameForSettings(s, range)
+        val syncOk = WeReadReadingSync.syncCurrentMonth(context, "mixed_calendar_preview")
+        val localData = buildLocalCalendarData(context, s)
+        val weReadData = buildStoredWeReadCalendarData(
+            context = context,
+            s = s,
+            monthStart = frame.monthStart,
+            monthEnd = frame.monthEnd,
+            weekRows = frame.weekRows,
+            gridStart = frame.gridStart
+        )
+        val data = mergeCalendarData(localData, weReadData, s) ?: return null
+        val bmp = drawCalendarWallpaper(context, data, s, sourceMark)
+        val localDays = data.cells.count {
+            it.inMonth && it.sourceKind == "NEO" && (it.totalMs > 0L || it.books.isNotEmpty())
+        }
+        val weReadDays = data.cells.count {
+            it.inMonth && it.sourceKind == "WEREAD" && (it.totalMs > 0L || it.books.isNotEmpty())
+        }
+        val mixedDays = data.cells.count {
+            it.inMonth && it.sourceKind == "MIXED" && (it.totalMs > 0L || it.books.isNotEmpty())
+        }
+        val source = when {
+            syncOk -> "network+db"
+            !AutoRefreshConfig.isReadingDataStoreEnabled(context) && weReadData != null ->
+                "cache_store_disabled"
+            weReadData != null -> "fallback_cache"
+            else -> "local_only"
+        }
+        return PreviewResult(
+            bmp,
+            "混合月历 month=${calendarTitleLabel(data, s)} source=$source stackOrder=${s.calendarStackOrder} localDays=$localDays weReadDays=$weReadDays mixedDays=$mixedDays records=${data.matchedRows} 输出=${canvasSizeText(s)}"
+        )
+    }
+
+    private fun mergeCalendarData(
+        local: CalendarBuildData?,
+        weRead: CalendarBuildData?,
+        s: AutoSettings
+    ): CalendarBuildData? {
+        if (local == null) {
+            return weRead?.copy(
+                footerLabel = "",
+                showDurationOnlyLabel = false,
+                showFooterLabel = false,
+                showDaySourceLabel = true,
+                cells = weRead.cells.map { cell ->
+                    cell.copy(sourceKind = if (cell.totalMs > 0L || cell.books.isNotEmpty()) "WEREAD" else "NEO")
+                }
+            )
+        }
+        if (weRead == null) {
+            return local.copy(
+                footerLabel = "",
+                showFooterLabel = false,
+                showDaySourceLabel = true
+            )
+        }
+        val localByDay = local.cells.associateBy { it.dayStartMs }
+        val weReadByDay = weRead.cells.associateBy { it.dayStartMs }
+        val cells = (localByDay.keys + weReadByDay.keys).sorted().map { day ->
+            val neoCell = localByDay[day]
+            val weReadCell = weReadByDay[day]
+            val neoActive = neoCell != null && (neoCell.totalMs > 0L || neoCell.books.isNotEmpty())
+            val weReadActive = weReadCell != null && (weReadCell.totalMs > 0L || weReadCell.books.isNotEmpty())
+            CalendarDayCell(
+                dayStartMs = day,
+                dayOfMonth = neoCell?.dayOfMonth ?: weReadCell?.dayOfMonth ?: 0,
+                inMonth = neoCell?.inMonth ?: weReadCell?.inMonth ?: false,
+                totalMs = (neoCell?.totalMs ?: 0L) + (weReadCell?.totalMs ?: 0L),
+                eventCount = (neoCell?.eventCount ?: 0) + (weReadCell?.eventCount ?: 0),
+                unmatchedCount = (neoCell?.unmatchedCount ?: 0) + (weReadCell?.unmatchedCount ?: 0),
+                books = mergeCalendarBooks(
+                    neoCell?.books.orEmpty() + weReadCell?.books.orEmpty(),
+                    s.calendarStackOrder
+                ),
+                sourceKind = when {
+                    neoActive && weReadActive -> "MIXED"
+                    weReadActive -> "WEREAD"
+                    else -> "NEO"
+                }
+            )
+        }
+        return CalendarBuildData(
+            monthStartMs = local.monthStartMs,
+            monthEndMs = local.monthEndMs,
+            weekRows = local.weekRows,
+            cells = cells,
+            statsRows = local.statsRows + weRead.statsRows,
+            matchedRows = local.matchedRows + weRead.matchedRows,
+            unmatchedRows = local.unmatchedRows + weRead.unmatchedRows,
+            footerLabel = "",
+            showDurationOnlyLabel = false,
+            showFooterLabel = false,
+            showDaySourceLabel = true
+        )
+    }
+
+    private fun mergeCalendarBooks(
+        books: List<CalendarCoverItem>,
+        stackOrder: String
+    ): List<CalendarCoverItem> {
+        val merged = books
+            .groupBy { calendarBookIdentity(it.title) }
+            .map { (_, sameBook) ->
+                val preferred = sameBook.maxWithOrNull(
+                    compareBy<CalendarCoverItem> { if (it.bitmap != null) 1 else 0 }
+                        .thenBy { it.lastSeenAt }
+                ) ?: sameBook.first()
+                preferred.copy(
+                    durationMs = sameBook.sumOf { it.durationMs },
+                    lastSeenAt = sameBook.maxOf { it.lastSeenAt },
+                    status = sameBook.maxOf { it.status }
+                )
+            }
+        val selected = when (stackOrder) {
+            "SHORTEST_TOP" -> merged.sortedBy { it.durationMs }
+            "LATEST_TOP" -> merged.sortedByDescending { it.lastSeenAt }
+            else -> merged.sortedByDescending { it.durationMs }
+        }.take(4)
+        return orderCalendarStack(selected, stackOrder)
+    }
+
+    private fun calendarBookIdentity(title: String): String {
+        return title.lowercase(Locale.ROOT)
+            .replace(Regex("[\\s·•:：,，.。()（）《》【】\\[\\]_-]+"), "")
+    }
+
     private fun buildWeReadPreviewForWallpaperMode(context: Context, wallpaperMode: String): PreviewResult? {
         return when (wallpaperMode) {
             "COVER" -> buildWeReadCoverPreviewFromPrefs(context, "W")
             "AUTO_COVER" -> buildWeReadCoverPreviewFromPrefs(context, "W")
                 ?: buildWeReadStatsPreviewFromPrefs(context, "W")
-            "CALENDAR" -> buildLocalCalendarPreviewFromPrefs(context, "M")
+            "CALENDAR" -> buildWeReadCalendarPreviewFromPrefs(context, "W")
             else -> buildWeReadStatsPreviewFromPrefs(context, "W")
         }
     }
@@ -389,17 +663,173 @@ object AutoWallpaperGenerator {
     private fun buildLocalCalendarPreviewForSettings(context: Context, s: AutoSettings, sourceMark: String): PreviewResult? {
         val data = buildLocalCalendarData(context, s) ?: return null
         val bmp = drawCalendarWallpaper(context, data, s, sourceMark)
-        val monthLabel = SimpleDateFormat("yyyy.MM", Locale.US).format(Date(data.monthStartMs))
+        val monthLabel = calendarTitleLabel(data, s)
         val coveredDays = data.cells.count { it.inMonth && it.books.isNotEmpty() }
         return PreviewResult(
             bmp,
-            "月历封面墙 month=$monthLabel daysWithCover=$coveredDays rows=${data.statsRows} matched=${data.matchedRows} unmatched=${data.unmatchedRows} 输出=${canvasSizeText(s)}"
+            "月历封面墙 month=$monthLabel stackOrder=${s.calendarStackOrder} daysWithCover=$coveredDays rows=${data.statsRows} matched=${data.matchedRows} unmatched=${data.unmatchedRows} 输出=${canvasSizeText(s)}"
+        )
+    }
+
+    private fun buildWeReadCalendarPreviewForSettings(
+        context: Context,
+        s: AutoSettings,
+        sourceMark: String,
+        syncOk: Boolean
+    ): PreviewResult? {
+        val range = resolvePeriodRange(s)
+        val frame = calendarFrameForSettings(s, range)
+        val data = buildStoredWeReadCalendarData(
+            context,
+            s,
+            frame.monthStart,
+            frame.monthEnd,
+            frame.weekRows,
+            frame.gridStart
+        ) ?: return null
+        val bmp = drawCalendarWallpaper(context, data, s, sourceMark)
+        val activeDays = data.cells.count { it.inMonth && it.totalMs > 0L }
+        val coveredDays = data.cells.count { it.inMonth && it.books.isNotEmpty() }
+        val source = when {
+            syncOk -> "network+db"
+            !AutoRefreshConfig.isReadingDataStoreEnabled(context) -> "cache_store_disabled"
+            else -> "fallback_cache"
+        }
+        return PreviewResult(
+            bmp,
+            "微信读书月历 month=${calendarTitleLabel(data, s)} source=$source stackOrder=${s.calendarStackOrder} activeDays=$activeDays daysWithCover=$coveredDays records=${data.matchedRows} 输出=${canvasSizeText(s)}"
+        )
+    }
+
+    private fun buildStoredWeReadCalendarData(
+        context: Context,
+        s: AutoSettings,
+        monthStart: Long,
+        monthEnd: Long,
+        weekRows: Int,
+        gridStart: Long
+    ): CalendarBuildData? {
+        val dateFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+        val startDate = dateFmt.format(Date(monthStart))
+        val endDate = dateFmt.format(Date(monthEnd))
+        val totals = ReadingDataStore.queryDailyTotals(context, "WEREAD", startDate, endDate)
+        val records = ReadingDataStore.queryDailyBooks(context, "WEREAD", startDate, endDate)
+            .filter { record ->
+                (s.includeUnread || record.status != 0) &&
+                    (s.readingFilterMode != "READING_ONLY" || record.status == 1) &&
+                    (s.readingFilterMode != "FINISHED_ONLY" || record.status == 2)
+            }
+        if (totals.isEmpty() && records.isEmpty()) {
+            AutoRefreshLog.i(context, "WeRead calendar database empty range=$startDate~$endDate")
+            return null
+        }
+        val totalsByDate = totals.associateBy { it.date }
+        val recordsByDate = records.groupBy { it.date }
+        val cells = (0 until weekRows * 7).map { index ->
+            val dayMs = gridStart + index * DAY_MS
+            val dc = Calendar.getInstance(TimeZone.getDefault()).apply { timeInMillis = dayMs }
+            val dayKey = dateFmt.format(Date(dayMs))
+            val dayRecords = recordsByDate[dayKey].orEmpty()
+            val selectedRecords = when (s.calendarStackOrder) {
+                "SHORTEST_TOP" -> dayRecords.sortedBy { it.durationMs }
+                "LATEST_TOP" -> dayRecords.sortedByDescending { it.lastSeenAt }
+                else -> dayRecords.sortedByDescending { it.durationMs }
+            }.take(4)
+            val books = orderCalendarStack(
+                selectedRecords.map { record ->
+                    CalendarCoverItem(
+                        title = record.title,
+                        author = record.author,
+                        path = record.bookKey,
+                        status = record.status,
+                        durationMs = record.durationMs,
+                        lastSeenAt = record.lastSeenAt,
+                        bitmap = record.coverCachePath
+                            ?.takeIf { it.isNotBlank() }
+                            ?.let { BitmapFactory.decodeFile(it) }
+                    )
+                },
+                s.calendarStackOrder
+            )
+            val totalMs = totalsByDate[dayKey]?.durationMs ?: dayRecords.sumOf { it.durationMs }
+            CalendarDayCell(
+                dayStartMs = dayMs,
+                dayOfMonth = dc.get(Calendar.DAY_OF_MONTH),
+                inMonth = dayMs in monthStart..monthEnd,
+                totalMs = totalMs,
+                eventCount = if (totalMs > 0L) 1 else 0,
+                unmatchedCount = if (totalMs > 0L && books.isEmpty()) 1 else 0,
+                books = books
+            )
+        }
+        AutoRefreshLog.i(
+            context,
+            "WeRead calendar data source=db range=$startDate~$endDate totals=${totals.size} dailyBooks=${records.size} activeDays=${cells.count { it.inMonth && it.totalMs > 0L }} daysWithBooks=${cells.count { it.inMonth && it.books.isNotEmpty() }}"
+        )
+        return CalendarBuildData(
+            monthStartMs = monthStart,
+            monthEndMs = monthEnd,
+            weekRows = weekRows,
+            cells = cells,
+            statsRows = totals.size,
+            matchedRows = records.size,
+            unmatchedRows = cells.count { it.inMonth && it.totalMs > 0L && it.books.isEmpty() },
+            footerLabel = "",
+            showDurationOnlyLabel = false,
+            showFooterLabel = false
         )
     }
 
     private fun buildLocalCalendarData(context: Context, s: AutoSettings): CalendarBuildData? {
         val baseRange = resolvePeriodRange(s)
-        val baseMs = baseRange?.second ?: System.currentTimeMillis()
+        val frame = calendarFrameForSettings(s, baseRange)
+        val monthStart = frame.monthStart
+        val monthEnd = frame.monthEnd
+        val weekRows = frame.weekRows
+        val gridStart = frame.gridStart
+
+        val liveData = buildLiveNeoCalendarData(context, s, monthStart, monthEnd, weekRows, gridStart)
+        if (!AutoRefreshConfig.isReadingDataStoreEnabled(context)) {
+            AutoRefreshLog.i(context, "calendar wallpaper data store disabled, use live Neo data")
+            return liveData
+        }
+        val storedData = buildStoredNeoCalendarData(context, s, monthStart, monthEnd, weekRows, gridStart)
+        if (storedData != null) {
+            AutoRefreshLog.i(
+                context,
+                "calendar wallpaper use data store month=${fmt(monthStart)} rows=${storedData.statsRows} daysWithBooks=${storedData.cells.count { it.inMonth && it.books.isNotEmpty() }}"
+            )
+            return storedData
+        }
+        AutoRefreshLog.i(context, "calendar wallpaper data store empty, fallback live month=${fmt(monthStart)}")
+        return liveData
+    }
+
+    private fun calendarFrameForSettings(s: AutoSettings, range: Pair<Long, Long>?): CalendarMonthFrame {
+        val safeRange = range ?: resolvePeriodRange(s)
+        return if (s.periodMode == "LAST_30_DAYS" && safeRange != null) {
+            rollingLast30CalendarFrame(safeRange.first, safeRange.second)
+        } else {
+            calendarMonthFrame(safeRange?.second ?: System.currentTimeMillis())
+        }
+    }
+
+    private fun rollingLast30CalendarFrame(rangeStart: Long, rangeEnd: Long): CalendarMonthFrame {
+        val endWeek = Calendar.getInstance(TimeZone.getDefault()).apply {
+            timeInMillis = rangeEnd
+            firstDayOfWeek = Calendar.MONDAY
+            set(Calendar.DAY_OF_WEEK, Calendar.MONDAY)
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }
+        endWeek.add(Calendar.DAY_OF_MONTH, -28)
+        val gridStart = startOfDayMs(endWeek.timeInMillis)
+        return CalendarMonthFrame(rangeStart, rangeEnd, 5, gridStart)
+    }
+
+    private fun calendarMonthFrame(baseMs: Long): CalendarMonthFrame {
         val cal = Calendar.getInstance(TimeZone.getDefault())
         cal.timeInMillis = baseMs
         cal.set(Calendar.DAY_OF_MONTH, 1)
@@ -419,17 +849,36 @@ object AutoWallpaperGenerator {
         val weekRows = ((mondayIndex + daysInMonth + 6) / 7).coerceIn(5, 6)
         gridCal.add(Calendar.DAY_OF_MONTH, -mondayIndex)
         val gridStart = startOfDayMs(gridCal.timeInMillis)
+        return CalendarMonthFrame(monthStart, monthEnd, weekRows, gridStart)
+    }
 
+    private fun isSameMonth(aMs: Long, bMs: Long): Boolean {
+        val a = Calendar.getInstance(TimeZone.getDefault()).apply { timeInMillis = aMs }
+        val b = Calendar.getInstance(TimeZone.getDefault()).apply { timeInMillis = bMs }
+        return a.get(Calendar.YEAR) == b.get(Calendar.YEAR) &&
+            a.get(Calendar.MONTH) == b.get(Calendar.MONTH)
+    }
+
+    private fun buildLiveNeoCalendarData(
+        context: Context,
+        s: AutoSettings,
+        monthStart: Long,
+        monthEnd: Long,
+        weekRows: Int,
+        gridStart: Long
+    ): CalendarBuildData? {
         val metadata = loadCalendarMetadata(context, s)
         val metadataByPath = metadata.associateBy { it.path }
         val candidates = metadata.filter { it.lastAccessMs > 0L }.ifEmpty { metadata }
         val durationByDayPath = linkedMapOf<Long, LinkedHashMap<String, Long>>()
+        val latestEventByDayPath = linkedMapOf<Long, LinkedHashMap<String, Long>>()
         val eventsByDay = linkedMapOf<Long, Int>()
         val unmatchedByDay = linkedMapOf<Long, Int>()
         val minMs = s.minDurationMinutes * 60_000L
         var rows = 0
         var matchedRows = 0
         var unmatchedRows = 0
+        var querySucceeded = false
 
         context.contentResolver.query(
             statsUri,
@@ -438,6 +887,7 @@ object AutoWallpaperGenerator {
             arrayOf(monthStart.toString(), monthEnd.toString()),
             null
         )?.use { c ->
+            querySucceeded = true
             while (c.moveToNext()) {
                 rows += 1
                 val rawEvent = readColString(c, "eventTime")?.toLongOrNull() ?: continue
@@ -460,6 +910,8 @@ object AutoWallpaperGenerator {
                 matchedRows += 1
                 val dayMap = durationByDayPath.getOrPut(day) { linkedMapOf() }
                 dayMap[matchedPath] = (dayMap[matchedPath] ?: 0L) + durationMs
+                val latestMap = latestEventByDayPath.getOrPut(day) { linkedMapOf() }
+                latestMap[matchedPath] = maxOf(latestMap[matchedPath] ?: 0L, eventMs)
             }
         }
 
@@ -468,9 +920,14 @@ object AutoWallpaperGenerator {
             val dc = Calendar.getInstance(TimeZone.getDefault()).apply { timeInMillis = dayMs }
             val inMonth = dayMs in monthStart..monthEnd
             val dayMap = durationByDayPath[dayMs].orEmpty()
-            val books = dayMap.entries
-                .sortedByDescending { it.value }
+            val latestMap = latestEventByDayPath[dayMs].orEmpty()
+            val selectedEntries = when (s.calendarStackOrder) {
+                "SHORTEST_TOP" -> dayMap.entries.sortedBy { it.value }
+                "LATEST_TOP" -> dayMap.entries.sortedByDescending { latestMap[it.key] ?: 0L }
+                else -> dayMap.entries.sortedByDescending { it.value }
+            }
                 .take(4)
+            val candidatesForDay = selectedEntries
                 .map { (path, ms) ->
                     val meta = metadataByPath[path]
                     CalendarCoverItem(
@@ -479,9 +936,11 @@ object AutoWallpaperGenerator {
                         path = path,
                         status = meta?.item?.status ?: 1,
                         durationMs = ms,
+                        lastSeenAt = latestMap[path] ?: dayMs,
                         bitmap = loadCalendarCoverBitmap(context, path)
                     )
                 }
+            val books = orderCalendarStack(candidatesForDay, s.calendarStackOrder)
             CalendarDayCell(
                 dayStartMs = dayMs,
                 dayOfMonth = dc.get(Calendar.DAY_OF_MONTH),
@@ -494,9 +953,142 @@ object AutoWallpaperGenerator {
         }
         AutoRefreshLog.i(
             context,
-            "calendar wallpaper data month=${fmt(monthStart)} rows=$rows metadata=${metadata.size} matched=$matchedRows unmatched=$unmatchedRows daysWithBooks=${cells.count { it.inMonth && it.books.isNotEmpty() }}"
+            "calendar wallpaper data month=${fmt(monthStart)} stackOrder=${s.calendarStackOrder} rows=$rows metadata=${metadata.size} matched=$matchedRows unmatched=$unmatchedRows daysWithBooks=${cells.count { it.inMonth && it.books.isNotEmpty() }} querySucceeded=$querySucceeded"
         )
+        if (querySucceeded && AutoRefreshConfig.isReadingDataStoreEnabled(context)) {
+            persistNeoCalendarEstimates(context, cells)
+        } else if (querySucceeded) {
+            AutoRefreshLog.i(context, "calendar persisted neo estimates skip: data store disabled")
+        } else {
+            AutoRefreshLog.i(
+                context,
+                "calendar persisted neo estimates skip: statistics provider returned null range=${fmt(monthStart)}~${fmt(monthEnd)}"
+            )
+        }
         return CalendarBuildData(monthStart, monthEnd, weekRows, cells, rows, matchedRows, unmatchedRows)
+    }
+
+    private fun buildStoredNeoCalendarData(
+        context: Context,
+        s: AutoSettings,
+        monthStart: Long,
+        monthEnd: Long,
+        weekRows: Int,
+        gridStart: Long
+    ): CalendarBuildData? {
+        val dateFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+        val startDate = dateFmt.format(Date(monthStart))
+        val endDate = dateFmt.format(Date(monthEnd))
+        val records = ReadingDataStore.queryDailyBooks(context, "NEO", startDate, endDate)
+            .filter { record ->
+                (s.includeUnread || record.status != 0) &&
+                    (s.readingFilterMode != "READING_ONLY" || record.status == 1) &&
+                    (s.readingFilterMode != "FINISHED_ONLY" || record.status == 2)
+            }
+        if (records.isEmpty()) return null
+        val grouped = records.groupBy { it.date }
+        val cells = (0 until weekRows * 7).map { index ->
+            val dayMs = gridStart + index * DAY_MS
+            val dc = Calendar.getInstance(TimeZone.getDefault()).apply { timeInMillis = dayMs }
+            val inMonth = dayMs in monthStart..monthEnd
+            val dayKey = dateFmt.format(Date(dayMs))
+            val dayRecords = grouped[dayKey].orEmpty()
+            val selectedRecords = when (s.calendarStackOrder) {
+                "SHORTEST_TOP" -> dayRecords.sortedBy { it.durationMs }
+                "LATEST_TOP" -> dayRecords.sortedByDescending { it.lastSeenAt }
+                else -> dayRecords.sortedByDescending { it.durationMs }
+            }
+                .take(4)
+            val candidatesForDay = selectedRecords
+                .map { record ->
+                    CalendarCoverItem(
+                        title = record.title,
+                        author = record.author,
+                        path = record.bookKey,
+                        status = record.status,
+                        durationMs = record.durationMs,
+                        lastSeenAt = record.lastSeenAt,
+                        bitmap = loadCalendarStoredCoverBitmap(context, record)
+                    )
+                }
+            val books = orderCalendarStack(candidatesForDay, s.calendarStackOrder)
+            CalendarDayCell(
+                dayStartMs = dayMs,
+                dayOfMonth = dc.get(Calendar.DAY_OF_MONTH),
+                inMonth = inMonth,
+                totalMs = dayRecords.sumOf { it.durationMs },
+                eventCount = dayRecords.size,
+                unmatchedCount = 0,
+                books = books
+            )
+        }
+        AutoRefreshLog.i(
+            context,
+            "calendar wallpaper data source=db month=${fmt(monthStart)} stackOrder=${s.calendarStackOrder} records=${records.size} daysWithBooks=${cells.count { it.inMonth && it.books.isNotEmpty() }}"
+        )
+        return CalendarBuildData(monthStart, monthEnd, weekRows, cells, records.size, records.size, 0)
+    }
+
+    private fun loadCalendarStoredCoverBitmap(context: Context, record: ReadingDataStore.DailyBookRecord): Bitmap? {
+        val fromCache = record.coverCachePath
+            ?.takeIf { it.isNotBlank() }
+            ?.let { BitmapFactory.decodeFile(it) }
+        if (fromCache != null) return fromCache
+        return if (record.bookKey.startsWith("/")) loadCalendarCoverBitmap(context, record.bookKey) else null
+    }
+
+    private fun persistNeoCalendarEstimates(context: Context, cells: List<CalendarDayCell>) {
+        val dateFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+        val rangeCells = cells.filter { it.inMonth }
+        if (rangeCells.isEmpty()) {
+            AutoRefreshLog.i(context, "calendar persisted neo estimates skip: empty range cells")
+            return
+        }
+        val records = rangeCells
+            .filter { it.books.isNotEmpty() }
+            .flatMap { cell ->
+                cell.books.map { book ->
+                    ReadingDataStore.DailyBookRecord(
+                        date = dateFmt.format(Date(cell.dayStartMs)),
+                        source = "NEO",
+                        bookKey = book.path.ifBlank { book.title },
+                        title = book.title,
+                        author = book.author,
+                        coverCachePath = calendarCoverCachePath(context, book.path),
+                        durationMs = book.durationMs,
+                        progress = null,
+                        status = book.status,
+                        confidence = "ESTIMATED",
+                        lastSeenAt = book.lastSeenAt
+                    )
+                }
+            }
+        val startDate = dateFmt.format(Date(rangeCells.minOf { it.dayStartMs }))
+        val endDate = dateFmt.format(Date(rangeCells.maxOf { it.dayStartMs }))
+        val written = ReadingDataStore.replaceDailyBooksForRange(
+            context = context,
+            source = "NEO",
+            startDate = startDate,
+            endDate = endDate,
+            records = records,
+            reason = "neo_calendar_estimates"
+        )
+        AutoRefreshLog.i(
+            context,
+            "calendar persisted neo estimates range=$startDate~$endDate records=${records.size} written=$written totalDb=${ReadingDataStore.countDailyBooks(context)}"
+        )
+    }
+
+    private fun orderCalendarStack(
+        books: List<CalendarCoverItem>,
+        mode: String
+    ): List<CalendarCoverItem> {
+        // Canvas 后绘制的封面位于最上层，因此目标书必须排在列表末尾。
+        return when (mode) {
+            "SHORTEST_TOP" -> books.sortedByDescending { it.durationMs }
+            "LATEST_TOP" -> books.sortedBy { it.lastSeenAt }
+            else -> books.sortedBy { it.durationMs }
+        }
     }
 
     private fun loadCalendarMetadata(context: Context, s: AutoSettings): List<MetadataBook> {
@@ -541,8 +1133,7 @@ object AutoWallpaperGenerator {
     private fun loadCalendarCoverBitmap(context: Context, path: String): Bitmap? {
         if (path.isBlank()) return null
         val file = File(path)
-        val cacheDir = File(context.cacheDir, "extracted_covers").apply { if (!exists()) mkdirs() }
-        val cacheFile = File(cacheDir, "${path.hashCode()}_${file.lastModified()}.jpg")
+        val cacheFile = File(calendarCoverCachePath(context, path).orEmpty())
         if (cacheFile.exists() && cacheFile.length() > 0L) {
             BitmapFactory.decodeFile(cacheFile.absolutePath)?.let { return it }
         }
@@ -555,9 +1146,25 @@ object AutoWallpaperGenerator {
         return bmp
     }
 
+    private fun calendarCoverCachePath(context: Context, path: String): String? {
+        if (path.isBlank()) return null
+        val file = File(path)
+        val cacheDir = File(context.cacheDir, "extracted_covers").apply { if (!exists()) mkdirs() }
+        return File(cacheDir, "${path.hashCode()}_${file.lastModified()}.jpg").absolutePath
+    }
+
     private fun canvasSizeText(s: AutoSettings): String {
-        val preset = BooxDevicePresets.byKey(s.booxDevicePreset)
-        return "${preset.label} ${preset.widthPx}x${preset.heightPx}"
+        val size = resolveWallpaperSize(s)
+        return "${size.label} ${size.width}x${size.height}"
+    }
+
+    private fun resolveWallpaperSize(s: AutoSettings): WallpaperSize {
+        return if (s.booxDevicePreset == BooxDevicePresets.CUSTOM_KEY) {
+            WallpaperSize("自定义", s.customWallpaperWidth.coerceIn(300, 4000), s.customWallpaperHeight.coerceIn(300, 4000))
+        } else {
+            val preset = BooxDevicePresets.byKey(s.booxDevicePreset)
+            WallpaperSize(preset.label, preset.widthPx, preset.heightPx)
+        }
     }
 
     private fun buildWeReadStatsForSettings(context: Context, s: AutoSettings): WeReadBuildData? {
@@ -578,6 +1185,7 @@ object AutoWallpaperGenerator {
                 AutoRefreshLog.i(context, "WeRead range fetch failed period=${s.periodMode} month=${fmt(monthStart)} detail=${stats.detail}")
                 return null
             }
+            persistWeReadMonthlyStats(context, monthStart, stats)
             stats.buckets.forEach { (bucketSec, seconds) ->
                 val bucketStart = startOfDayMs(bucketSec * 1000L)
                 if (bucketStart in range.first..range.second) {
@@ -632,6 +1240,7 @@ object AutoWallpaperGenerator {
                 weReadFailures.add("${fmt(monthStart)} ${stats.detail.take(80)}")
                 return@forEach
             }
+            persistWeReadMonthlyStats(context, monthStart, stats)
             stats.buckets.forEach { (bucketSec, seconds) ->
                 val bucketStart = startOfDayMs(bucketSec * 1000L)
                 if (bucketStart in range.first..range.second) {
@@ -669,6 +1278,94 @@ object AutoWallpaperGenerator {
             "Mixed stats range=${fmt(range.first)}~${fmt(range.second)} localEvents=${localEvents.size} weReadEvents=${weReadEvents.size} localBooks=${localBooks.size} weReadBooks=${weReadBooks.size} mergedBooks=${mergedBooks.size} weReadFailures=${weReadFailures.size} totalMs=${chart.totalMs}"
         )
         return WeReadBuildData(range.first, range.second, chart, mergedBooks, "混合", note)
+    }
+
+    internal fun persistWeReadMonthlyStats(
+        context: Context,
+        monthStartMs: Long,
+        stats: WeReadClient.WallpaperStatsResult,
+        captureSnapshot: Boolean = true
+    ) {
+        if (!stats.ok) return
+        if (!AutoRefreshConfig.isReadingDataStoreEnabled(context)) {
+            AutoRefreshLog.i(context, "WeRead data store persist skip disabled")
+            return
+        }
+        val dateFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+        val monthStart = Calendar.getInstance(TimeZone.getDefault()).apply {
+            timeInMillis = monthStartMs
+            set(Calendar.DAY_OF_MONTH, 1)
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }
+        val periodStart = dateFmt.format(Date(monthStart.timeInMillis))
+        monthStart.add(Calendar.MONTH, 1)
+        monthStart.add(Calendar.DAY_OF_MONTH, -1)
+        val periodEnd = dateFmt.format(Date(monthStart.timeInMillis))
+        val now = System.currentTimeMillis()
+
+        val totals = stats.buckets.mapNotNull { (bucketSeconds, durationSeconds) ->
+            val dayMs = startOfDayMs(bucketSeconds * 1000L)
+            val date = dateFmt.format(Date(dayMs))
+            if (date !in periodStart..periodEnd || durationSeconds <= 0L) {
+                null
+            } else {
+                ReadingDataStore.DailyTotalRecord(
+                    date = date,
+                    source = "WEREAD",
+                    durationMs = durationSeconds * 1000L,
+                    confidence = "EXACT_API",
+                    updatedAt = now
+                )
+            }
+        }
+        val totalsWritten = ReadingDataStore.replaceDailyTotalsForRange(
+            context = context,
+            source = "WEREAD",
+            startDate = periodStart,
+            endDate = periodEnd,
+            records = totals,
+            reason = "weread_monthly_stats"
+        )
+
+        val latestCover = WeReadClient.cachedLatestCover(context)
+        val periodBooks = stats.books.map { book ->
+            val cachedPath = latestCover
+                ?.takeIf { it.bookId == book.bookId && it.cachePath.isNotBlank() }
+                ?.cachePath
+            ReadingDataStore.PeriodBookRecord(
+                periodStart = periodStart,
+                periodEnd = periodEnd,
+                source = "WEREAD",
+                bookKey = book.bookId.ifBlank { "${book.title.trim()}|${book.author.trim()}" },
+                title = book.title,
+                author = book.author,
+                coverCachePath = cachedPath,
+                durationMs = book.readSeconds * 1000L,
+                confidence = "MONTHLY_RANKING",
+                lastSeenAt = latestCover
+                    ?.takeIf { it.bookId == book.bookId }
+                    ?.readUpdateTimeMs
+                    ?: 0L
+            )
+        }
+        val booksWritten = ReadingDataStore.replacePeriodBooks(
+            context = context,
+            source = "WEREAD",
+            periodStart = periodStart,
+            periodEnd = periodEnd,
+            records = periodBooks,
+            reason = "weread_monthly_ranking"
+        )
+        AutoRefreshLog.i(
+            context,
+            "WeRead data store persisted period=$periodStart~$periodEnd daily=${totals.size}/$totalsWritten candidates=${periodBooks.size}/$booksWritten totalDaily=${ReadingDataStore.countDailyTotals(context, "WEREAD")} totalCandidates=${ReadingDataStore.countPeriodBooks(context, "WEREAD")}"
+        )
+        if (captureSnapshot) {
+            WeReadReadingSync.captureCurrentMonth(context, monthStartMs, stats)
+        }
     }
 
     private fun queryTopBooksByDuration(
@@ -827,6 +1524,7 @@ object AutoWallpaperGenerator {
             "YESTERDAY" -> "昨天"
             "THIS_WEEK" -> "本周"
             "LAST_WEEK" -> "上周"
+            "THIS_MONTH" -> "本月"
             "LAST_7_DAYS" -> "最近7天"
             "LAST_30_DAYS" -> "最近30天"
             "CUSTOM" -> "自定义周期"
@@ -1177,9 +1875,9 @@ object AutoWallpaperGenerator {
     }
 
     private fun renderCoverWallpaper(context: Context, cover: Bitmap, title: String, sourceMark: String, s: AutoSettings): Bitmap {
-        val preset = BooxDevicePresets.byKey(s.booxDevicePreset)
-        val w = preset.widthPx
-        val h = preset.heightPx
+        val size = resolveWallpaperSize(s)
+        val w = size.width
+        val h = size.height
         val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(out)
         canvas.drawColor(Color.WHITE)
@@ -1195,9 +1893,9 @@ object AutoWallpaperGenerator {
     }
 
     private fun drawCalendarWallpaper(context: Context, data: CalendarBuildData, s: AutoSettings, sourceMark: String): Bitmap {
-        val preset = BooxDevicePresets.byKey(s.booxDevicePreset)
-        val w = preset.widthPx
-        val h = preset.heightPx
+        val size = resolveWallpaperSize(s)
+        val w = size.width
+        val h = size.height
         val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(out)
         val bg = Color.rgb(247, 242, 234)
@@ -1252,15 +1950,16 @@ object AutoWallpaperGenerator {
 
         val marginX = w * 0.055f
         val top = h * 0.034f
-        val monthText = SimpleDateFormat("M/yyyy", Locale.US).format(Date(data.monthStartMs))
+        val monthText = calendarTitleLabel(data, s)
         canvas.drawText(monthText, marginX, top + title.textSize, title)
         val coveredDays = data.cells.count { it.inMonth && it.books.isNotEmpty() }
         val totalDuration = data.cells.filter { it.inMonth }.sumOf { it.totalMs }
         val uniqueBooks = data.cells
             .filter { it.inMonth }
             .flatMap { it.books }
-            .distinctBy { it.path.ifBlank { it.title } }
-        val averagePerActiveDay = if (coveredDays > 0) totalDuration / coveredDays else 0L
+            .distinctBy { calendarBookIdentity(it.title) }
+        val activeDays = data.cells.count { it.inMonth && it.totalMs > 0L }
+        val averagePerActiveDay = if (activeDays > 0) totalDuration / activeDays else 0L
         canvas.drawText("总时长 ${compactDuration(totalDuration)}", w - marginX, top + title.textSize * 0.46f, summaryPaint)
         summaryPaint.typeface = Typeface.create(bodyFace, Typeface.NORMAL)
         canvas.drawText("日均 ${compactDuration(averagePerActiveDay)} · 读过${uniqueBooks.size}本", w - marginX, top + title.textSize * 0.82f, summaryPaint)
@@ -1296,6 +1995,24 @@ object AutoWallpaperGenerator {
                 val alpha = if (cell.inMonth) 255 else 70
                 dayPaint.color = if (col == 6) Color.argb(alpha, 200, 56, 48) else Color.argb(alpha, 48, 20, 20)
                 canvas.drawText(cell.dayOfMonth.toString(), x0 + colW * 0.08f, y0 + rowH * 0.22f, dayPaint)
+                if (
+                    data.showDaySourceLabel &&
+                    cell.inMonth &&
+                    (cell.totalMs > 0L || cell.books.isNotEmpty())
+                ) {
+                    smallPaint.color = when (cell.sourceKind) {
+                        "WEREAD" -> Color.rgb(47, 105, 76)
+                        "MIXED" -> accent
+                        else -> muted
+                    }
+                    smallPaint.textAlign = Paint.Align.RIGHT
+                    val sourceLabel = when (cell.sourceKind) {
+                        "WEREAD" -> "W"
+                        "MIXED" -> "M"
+                        else -> "N"
+                    }
+                    canvas.drawText(sourceLabel, x0 + colW * 0.91f, y0 + rowH * 0.18f, smallPaint)
+                }
 
                 if (cell.inMonth && cell.books.isNotEmpty()) {
                     val coverArea = RectF(
@@ -1315,19 +2032,41 @@ object AutoWallpaperGenerator {
                         )
                     }
                 } else if (cell.inMonth && cell.eventCount > 0) {
-                    smallPaint.color = muted
-                    smallPaint.textAlign = Paint.Align.LEFT
-                    canvas.drawText("未匹配", x0 + colW * 0.08f, y0 + rowH * 0.52f, smallPaint)
+                    if (data.showDurationOnlyLabel) {
+                        smallPaint.color = muted
+                        smallPaint.textAlign = Paint.Align.LEFT
+                        canvas.drawText("仅时长", x0 + colW * 0.08f, y0 + rowH * 0.52f, smallPaint)
+                    }
+                    if (cell.totalMs > 0L) {
+                        drawCalendarOutlineDuration(
+                            canvas,
+                            compactDuration(cell.totalMs),
+                            x0 + colW * 0.92f,
+                            y0 + rowH * 0.88f,
+                            bodyFace
+                        )
+                    }
                 }
             }
         }
 
-        val note = "Neo 本地月历 · ${coveredDays}天有封面 · 近似匹配"
-        smallPaint.color = muted
-        smallPaint.textAlign = Paint.Align.LEFT
-        canvas.drawText(note, marginX, h - h * 0.024f, smallPaint)
+        if (data.showFooterLabel) {
+            val note = "${data.footerLabel} · ${coveredDays}天有封面"
+            smallPaint.color = muted
+            smallPaint.textAlign = Paint.Align.LEFT
+            canvas.drawText(note, marginX, h - h * 0.024f, smallPaint)
+        }
         drawSourceCornerMark(canvas, w, h, sourceMark, 1f)
         return out
+    }
+
+    private fun calendarTitleLabel(data: CalendarBuildData, s: AutoSettings): String {
+        return if (s.periodMode == "LAST_30_DAYS") {
+            val fmt = SimpleDateFormat("M/d", Locale.US)
+            "${fmt.format(Date(data.monthStartMs))}-${fmt.format(Date(data.monthEndMs))}"
+        } else {
+            SimpleDateFormat("M/yyyy", Locale.US).format(Date(data.monthStartMs))
+        }
     }
 
     private fun drawCalendarBookStack(canvas: Canvas, area: RectF, books: List<CalendarCoverItem>, bodyFace: Typeface) {
@@ -1442,6 +2181,7 @@ object AutoWallpaperGenerator {
             readingFilterMode = p.getString("reading_filter_mode", "ALL") ?: "ALL",
             sourceMode = p.getString("source_mode", "DURATION") ?: "DURATION",
             wallpaperMode = p.getString("wallpaper_mode", "STATS") ?: "STATS",
+            calendarStackOrder = p.getString("calendar_stack_order", "LONGEST_TOP") ?: "LONGEST_TOP",
             coverFitMode = p.getString("cover_fit_mode", "FIT") ?: "FIT",
             progressMode = p.getString("progress_mode", "PAGES") ?: "PAGES",
             timeUnit = p.getString("time_unit", "HOUR") ?: "HOUR",
@@ -1452,6 +2192,8 @@ object AutoWallpaperGenerator {
             serialNumberCustom = (p.getString("serial_number_custom", "") ?: "").filter { it.isDigit() }.take(12),
             serialNumberSize = p.getFloat("serial_number_size", 46f).coerceIn(24f, 140f),
             booxDevicePreset = p.getString("boox_device_preset", BooxDevicePresets.DEFAULT_KEY) ?: BooxDevicePresets.DEFAULT_KEY,
+            customWallpaperWidth = p.getInt("custom_wallpaper_width", BooxDevicePresets.byKey(BooxDevicePresets.DEFAULT_KEY).widthPx).coerceIn(300, 4000),
+            customWallpaperHeight = p.getInt("custom_wallpaper_height", BooxDevicePresets.byKey(BooxDevicePresets.DEFAULT_KEY).heightPx).coerceIn(300, 4000),
             footerMode = p.getString("footer_mode", "NONE") ?: "NONE",
             barcodeWidthScale = p.getFloat("barcode_width_scale", 1.0f).coerceIn(0.6f, 1.6f),
             barcodeGapMode = p.getString("barcode_gap_mode", "STANDARD") ?: "STANDARD",
@@ -1474,9 +2216,9 @@ object AutoWallpaperGenerator {
         s0: AutoSettings,
         sourceMark: String
     ): Bitmap {
-        val devicePreset = BooxDevicePresets.byKey(s0.booxDevicePreset)
-        val w = devicePreset.widthPx
-        val h = devicePreset.heightPx
+        val wallpaperSize = resolveWallpaperSize(s0)
+        val w = wallpaperSize.width
+        val h = wallpaperSize.height
         val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val c = Canvas(bmp)
         c.drawColor(Color.WHITE)
@@ -1502,46 +2244,59 @@ object AutoWallpaperGenerator {
         val mono = Paint(black).apply { textSize = s((s0.receiptBodySize * 0.88f).coerceIn(16f, 56f)); typeface = bodyFace }
         val line = Paint(black).apply { strokeWidth = s(3f) }
 
+        val leftMargin = s(60f)
+        val rightMargin = s(60f)
+        val rightEdge = w - rightMargin
+        val summaryWidth = maxOf(s(380f), w * 0.46f)
+            .coerceAtMost((w - leftMargin - rightMargin - s(280f)).coerceAtLeast(w * 0.34f))
+        val summaryLeft = rightEdge - summaryWidth
+        val leftInfoMaxWidth = (summaryLeft - leftMargin - s(24f)).coerceAtLeast(w * 0.35f)
+        val noX = leftMargin
+        val titleX = s(260f)
+        val qtyX = w - s(260f)
+        val unitX = w - s(140f)
+        val titleColumnMaxWidth = (qtyX - titleX - s(28f)).coerceAtLeast(s(160f))
+
         var y = s(110f)
-        c.drawText(shortTitle(s0.receiptTitle, 12), w - s(360f), y, titlePaint)
+        drawFittedText(c, s0.receiptTitle, rightEdge, y, titlePaint, summaryWidth, Paint.Align.RIGHT, 0.62f)
         y += s(30f)
         val serialBaseY = y + s(40f)
         val serialPrefix = "单号: "
         val serialValue = resolveSerialNumber(s0)
-        c.drawText(serialPrefix, s(60f), serialBaseY, h1)
+        c.drawText(serialPrefix, leftMargin, serialBaseY, h1)
         val prefixWidth = h1.measureText(serialPrefix)
-        c.drawText(serialValue, s(60f) + prefixWidth, serialBaseY, serialNumberPaint)
-        c.drawText("操作编号: ${System.currentTimeMillis().toString().takeLast(6)}", s(60f), y + s(95f), text)
-        c.drawText("时间: ${fmt(rangeStart)} - ${fmt(rangeEnd)}", s(60f), y + s(145f), text)
-        c.drawText("设备: ${devicePreset.displayText()}", s(60f), y + s(195f), text)
-        c.drawText("时长: ${formatDuration(stats.totalMs, s0.timeUnit)}", w - s(520f), y + s(145f), h1)
-        c.drawText("书籍: ${books.size}", w - s(520f), y + s(195f), text)
+        drawFittedText(c, serialValue, leftMargin + prefixWidth, serialBaseY, serialNumberPaint, (summaryLeft - leftMargin - prefixWidth - s(24f)).coerceAtLeast(s(180f)), Paint.Align.LEFT, 0.7f)
+        drawFittedText(c, "操作编号: ${System.currentTimeMillis().toString().takeLast(6)}", leftMargin, y + s(95f), text, leftInfoMaxWidth, Paint.Align.LEFT, 0.78f)
+        drawFittedText(c, "时间: ${fmt(rangeStart)} - ${fmt(rangeEnd)}", leftMargin, y + s(145f), text, leftInfoMaxWidth, Paint.Align.LEFT, 0.78f)
+        drawFittedText(c, "设备: ${wallpaperSize.label}", leftMargin, y + s(195f), text, leftInfoMaxWidth, Paint.Align.LEFT, 0.78f)
+        drawFittedText(c, "时长: ${formatDuration(stats.totalMs, s0.timeUnit)}", rightEdge, y + s(145f), h1, summaryWidth, Paint.Align.RIGHT, 0.76f)
+        drawFittedText(c, "书籍: ${books.size}", rightEdge, y + s(195f), text, summaryWidth, Paint.Align.RIGHT, 0.78f)
 
         y += s(250f)
         c.drawLine(s(40f), y, w - s(40f), y, line)
         y += s(48f)
-        c.drawText("品类", s(60f), y, text)
-        c.drawText("数量", w - s(260f), y, text)
-        c.drawText("单位", w - s(140f), y, text)
+        c.drawText("品类", noX, y, text)
+        drawFittedText(c, "数量", qtyX, y, text, s(84f), Paint.Align.CENTER, 0.8f)
+        drawFittedText(c, "单位", unitX, y, text, s(84f), Paint.Align.CENTER, 0.8f)
         y += s(28f)
         c.drawLine(s(40f), y, w - s(40f), y, line)
 
         books.forEachIndexed { idx, b ->
             y += s(80f)
-            c.drawText("NO.${(idx + 1).toString().padStart(2, '0')}", s(60f), y, h1)
-            c.drawText(shortTitle(b.title, 16), s(260f), y, h1)
-            c.drawText("1", w - s(260f), y, h1)
-            c.drawText("本", w - s(140f), y, h1)
+            c.drawText("NO.${(idx + 1).toString().padStart(2, '0')}", noX, y, h1)
+            drawFittedText(c, b.title, titleX, y, h1, titleColumnMaxWidth, Paint.Align.LEFT, 0.68f)
+            drawFittedText(c, "1", qtyX, y, h1, s(84f), Paint.Align.CENTER, 0.8f)
+            drawFittedText(c, "本", unitX, y, h1, s(84f), Paint.Align.CENTER, 0.8f)
             if (s0.showAuthor) {
                 y += s(42f)
-                c.drawText("作者:${shortTitle(b.author ?: "未知", 20)}", s(260f), y, mono)
+                drawFittedText(c, "作者:${b.author ?: "未知"}", titleX, y, mono, (rightEdge - titleX).coerceAtLeast(s(180f)), Paint.Align.LEFT, 0.78f)
             }
             if (s0.showProgressStatus) {
                 y += s(50f)
                 val st = when (b.status) { 2 -> "已读完"; 1 -> "阅读中"; else -> "未读" }
                 val value = b.progressText ?: formatProgress(b.progress, s0.progressMode)
                 val duration = if (s0.showBookDuration && !b.durationText.isNullOrBlank()) "  时长:${b.durationText}" else ""
-                c.drawText("进度:$value  状态:$st$duration", s(260f), y, mono)
+                drawFittedText(c, "进度:$value  状态:$st$duration", titleX, y, mono, (rightEdge - titleX).coerceAtLeast(s(180f)), Paint.Align.LEFT, 0.78f)
             }
         }
 
@@ -1549,8 +2304,8 @@ object AutoWallpaperGenerator {
         c.drawLine(s(40f), y, w - s(40f), y, line)
         y += s(60f)
         val avgDiv = stats.points.size.coerceAtLeast(1)
-        c.drawText("日均: ${String.format(Locale.US, "%.0f分钟", stats.totalMs / avgDiv.toDouble() / 60000.0)}", s(60f), y, h1)
-        c.drawText("本期合计: ${formatDuration(stats.totalMs, s0.timeUnit)}", w - s(560f), y, h1)
+        drawFittedText(c, "日均: ${String.format(Locale.US, "%.0f分钟", stats.totalMs / avgDiv.toDouble() / 60000.0)}", leftMargin, y, h1, (w * 0.38f), Paint.Align.LEFT, 0.72f)
+        drawFittedText(c, "本期合计: ${formatDuration(stats.totalMs, s0.timeUnit)}", rightEdge, y, h1, (w * 0.54f), Paint.Align.RIGHT, 0.72f)
 
         y += s(50f)
         val footerReserved = if (!hasFooter) 0f else if (s0.footerMode == "BARCODE") s(260f) else s(120f)
@@ -1604,7 +2359,7 @@ object AutoWallpaperGenerator {
             val baseY = if (s0.showChart) (chartBottomUsed + s(64f)) else (y + s(16f))
             c.drawLine(s(40f), baseY, w - s(40f), baseY, line)
             if (s0.footerMode == "NOTE") {
-                c.drawText("备注: ${shortTitle(s0.noteText, 40)}", s(60f), baseY + s(58f), text)
+                drawFittedText(c, "备注: ${s0.noteText}", leftMargin, baseY + s(58f), text, (rightEdge - leftMargin), Paint.Align.LEFT, 0.78f)
             } else if (s0.footerMode == "BARCODE") {
                 val qr = buildQrBitmap(s0.noteText, s(168f).toInt().coerceAtLeast(120))
                 if (qr != null) {
@@ -1617,15 +2372,63 @@ object AutoWallpaperGenerator {
                     val decorH = (qr.height - s(20f)).toFloat().coerceAtLeast(s(60f))
                     drawBarcodeDecor(c, decorX, decorY, decorW, decorH, s0.noteText, s0.barcodeWidthScale, s0.barcodeGapMode, black)
                     val textY = qrY + qr.height + s(34f)
-                    c.drawText(shortTitle(s0.noteText, 36), qrX, textY, mono)
+                    drawFittedText(c, s0.noteText, qrX, textY, mono, (rightEdge - qrX), Paint.Align.LEFT, 0.78f)
                 } else {
-                    c.drawText("二维码生成失败，备注: ${shortTitle(s0.noteText, 36)}", s(60f), baseY + s(58f), text)
+                    drawFittedText(c, "二维码生成失败，备注: ${s0.noteText}", leftMargin, baseY + s(58f), text, (rightEdge - leftMargin), Paint.Align.LEFT, 0.78f)
                 }
             }
         }
 
         drawSourceCornerMark(c, w, h, sourceMark, gs)
         return bmp
+    }
+
+    private fun drawFittedText(
+        canvas: Canvas,
+        raw: String,
+        x: Float,
+        y: Float,
+        paint: Paint,
+        maxWidth: Float,
+        align: Paint.Align = Paint.Align.LEFT,
+        minScale: Float = 0.72f
+    ) {
+        if (raw.isBlank() || maxWidth <= 0f) return
+        val originalTextSize = paint.textSize
+        val originalAlign = paint.textAlign
+        val safeMinScale = minScale.coerceIn(0.45f, 1f)
+        val minTextSize = originalTextSize * safeMinScale
+
+        var fitted = raw
+        if (paint.measureText(fitted) > maxWidth) {
+            val ratio = (maxWidth / paint.measureText(fitted)).coerceIn(safeMinScale, 1f)
+            paint.textSize = originalTextSize * ratio
+            if (paint.textSize < minTextSize) paint.textSize = minTextSize
+        }
+        fitted = ellipsizeToWidth(fitted, paint, maxWidth)
+        paint.textAlign = align
+        canvas.drawText(fitted, x, y, paint)
+        paint.textSize = originalTextSize
+        paint.textAlign = originalAlign
+    }
+
+    private fun ellipsizeToWidth(raw: String, paint: Paint, maxWidth: Float): String {
+        if (raw.isEmpty() || paint.measureText(raw) <= maxWidth) return raw
+        val ellipsis = "…"
+        val ellipsisWidth = paint.measureText(ellipsis)
+        if (ellipsisWidth >= maxWidth) return ellipsis
+        var lo = 0
+        var hi = raw.length
+        while (lo < hi) {
+            val mid = (lo + hi + 1) / 2
+            val candidate = raw.take(mid) + ellipsis
+            if (paint.measureText(candidate) <= maxWidth) {
+                lo = mid
+            } else {
+                hi = mid - 1
+            }
+        }
+        return raw.take(lo).trimEnd() + ellipsis
     }
 
     private fun resolveSerialNumber(s: AutoSettings): String {
@@ -1704,7 +2507,7 @@ object AutoWallpaperGenerator {
         return when (s.periodMode) {
             "TODAY", "YESTERDAY" -> BucketMode.HOUR
             "THIS_WEEK", "LAST_WEEK", "LAST_7_DAYS" -> BucketMode.DAY
-            "LAST_30_DAYS" -> BucketMode.DAY
+            "THIS_MONTH", "LAST_30_DAYS" -> BucketMode.DAY
             "CUSTOM" -> when {
                 days <= 14 -> BucketMode.DAY
                 days <= 90 -> BucketMode.WEEK
@@ -1964,6 +2767,14 @@ object AutoWallpaperGenerator {
                 cal.add(Calendar.DAY_OF_MONTH, -6)
                 cal.set(Calendar.HOUR_OF_DAY, 0); cal.set(Calendar.MINUTE, 0); cal.set(Calendar.SECOND, 0); cal.set(Calendar.MILLISECOND, 0)
                 cal.timeInMillis to end
+            }
+            "THIS_MONTH" -> {
+                cal.set(Calendar.DAY_OF_MONTH, 1)
+                cal.set(Calendar.HOUR_OF_DAY, 0); cal.set(Calendar.MINUTE, 0); cal.set(Calendar.SECOND, 0); cal.set(Calendar.MILLISECOND, 0)
+                val start = cal.timeInMillis
+                cal.add(Calendar.MONTH, 1)
+                cal.add(Calendar.MILLISECOND, -1)
+                start to cal.timeInMillis
             }
             "LAST_30_DAYS" -> {
                 cal.set(Calendar.HOUR_OF_DAY, 23); cal.set(Calendar.MINUTE, 59); cal.set(Calendar.SECOND, 59); cal.set(Calendar.MILLISECOND, 999)
