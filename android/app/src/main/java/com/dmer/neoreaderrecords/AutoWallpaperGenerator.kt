@@ -2230,46 +2230,58 @@ object AutoWallpaperGenerator {
         val mono = Paint(black).apply { textSize = s((s0.receiptBodySize * 0.88f).coerceIn(16f, 56f)); typeface = bodyFace }
         val line = Paint(black).apply { strokeWidth = s(3f) }
 
+        val leftMargin = s(60f)
+        val rightMargin = s(60f)
+        val rightEdge = w - rightMargin
+        val summaryWidth = s(380f).coerceAtMost(w * 0.46f)
+        val summaryLeft = rightEdge - summaryWidth
+        val leftInfoMaxWidth = (summaryLeft - leftMargin - s(24f)).coerceAtLeast(w * 0.35f)
+        val noX = leftMargin
+        val titleX = s(260f)
+        val qtyX = w - s(260f)
+        val unitX = w - s(140f)
+        val titleColumnMaxWidth = (qtyX - titleX - s(28f)).coerceAtLeast(s(160f))
+
         var y = s(110f)
-        c.drawText(shortTitle(s0.receiptTitle, 12), w - s(360f), y, titlePaint)
+        drawFittedText(c, s0.receiptTitle, rightEdge, y, titlePaint, summaryWidth, Paint.Align.RIGHT, 0.62f)
         y += s(30f)
         val serialBaseY = y + s(40f)
         val serialPrefix = "单号: "
         val serialValue = resolveSerialNumber(s0)
-        c.drawText(serialPrefix, s(60f), serialBaseY, h1)
+        c.drawText(serialPrefix, leftMargin, serialBaseY, h1)
         val prefixWidth = h1.measureText(serialPrefix)
-        c.drawText(serialValue, s(60f) + prefixWidth, serialBaseY, serialNumberPaint)
-        c.drawText("操作编号: ${System.currentTimeMillis().toString().takeLast(6)}", s(60f), y + s(95f), text)
-        c.drawText("时间: ${fmt(rangeStart)} - ${fmt(rangeEnd)}", s(60f), y + s(145f), text)
-        c.drawText("设备: ${devicePreset.displayText()}", s(60f), y + s(195f), text)
-        c.drawText("时长: ${formatDuration(stats.totalMs, s0.timeUnit)}", w - s(520f), y + s(145f), h1)
-        c.drawText("书籍: ${books.size}", w - s(520f), y + s(195f), text)
+        drawFittedText(c, serialValue, leftMargin + prefixWidth, serialBaseY, serialNumberPaint, (summaryLeft - leftMargin - prefixWidth - s(24f)).coerceAtLeast(s(180f)), Paint.Align.LEFT, 0.7f)
+        drawFittedText(c, "操作编号: ${System.currentTimeMillis().toString().takeLast(6)}", leftMargin, y + s(95f), text, leftInfoMaxWidth, Paint.Align.LEFT, 0.78f)
+        drawFittedText(c, "时间: ${fmt(rangeStart)} - ${fmt(rangeEnd)}", leftMargin, y + s(145f), text, leftInfoMaxWidth, Paint.Align.LEFT, 0.78f)
+        drawFittedText(c, "设备: ${devicePreset.displayText()}", leftMargin, y + s(195f), text, leftInfoMaxWidth, Paint.Align.LEFT, 0.78f)
+        drawFittedText(c, "时长: ${formatDuration(stats.totalMs, s0.timeUnit)}", rightEdge, y + s(145f), h1, summaryWidth, Paint.Align.RIGHT, 0.76f)
+        drawFittedText(c, "书籍: ${books.size}", rightEdge, y + s(195f), text, summaryWidth, Paint.Align.RIGHT, 0.78f)
 
         y += s(250f)
         c.drawLine(s(40f), y, w - s(40f), y, line)
         y += s(48f)
-        c.drawText("品类", s(60f), y, text)
-        c.drawText("数量", w - s(260f), y, text)
-        c.drawText("单位", w - s(140f), y, text)
+        c.drawText("品类", noX, y, text)
+        drawFittedText(c, "数量", qtyX, y, text, s(84f), Paint.Align.CENTER, 0.8f)
+        drawFittedText(c, "单位", unitX, y, text, s(84f), Paint.Align.CENTER, 0.8f)
         y += s(28f)
         c.drawLine(s(40f), y, w - s(40f), y, line)
 
         books.forEachIndexed { idx, b ->
             y += s(80f)
-            c.drawText("NO.${(idx + 1).toString().padStart(2, '0')}", s(60f), y, h1)
-            c.drawText(shortTitle(b.title, 16), s(260f), y, h1)
-            c.drawText("1", w - s(260f), y, h1)
-            c.drawText("本", w - s(140f), y, h1)
+            c.drawText("NO.${(idx + 1).toString().padStart(2, '0')}", noX, y, h1)
+            drawFittedText(c, b.title, titleX, y, h1, titleColumnMaxWidth, Paint.Align.LEFT, 0.68f)
+            drawFittedText(c, "1", qtyX, y, h1, s(84f), Paint.Align.CENTER, 0.8f)
+            drawFittedText(c, "本", unitX, y, h1, s(84f), Paint.Align.CENTER, 0.8f)
             if (s0.showAuthor) {
                 y += s(42f)
-                c.drawText("作者:${shortTitle(b.author ?: "未知", 20)}", s(260f), y, mono)
+                drawFittedText(c, "作者:${b.author ?: "未知"}", titleX, y, mono, (rightEdge - titleX).coerceAtLeast(s(180f)), Paint.Align.LEFT, 0.78f)
             }
             if (s0.showProgressStatus) {
                 y += s(50f)
                 val st = when (b.status) { 2 -> "已读完"; 1 -> "阅读中"; else -> "未读" }
                 val value = b.progressText ?: formatProgress(b.progress, s0.progressMode)
                 val duration = if (s0.showBookDuration && !b.durationText.isNullOrBlank()) "  时长:${b.durationText}" else ""
-                c.drawText("进度:$value  状态:$st$duration", s(260f), y, mono)
+                drawFittedText(c, "进度:$value  状态:$st$duration", titleX, y, mono, (rightEdge - titleX).coerceAtLeast(s(180f)), Paint.Align.LEFT, 0.78f)
             }
         }
 
@@ -2277,8 +2289,8 @@ object AutoWallpaperGenerator {
         c.drawLine(s(40f), y, w - s(40f), y, line)
         y += s(60f)
         val avgDiv = stats.points.size.coerceAtLeast(1)
-        c.drawText("日均: ${String.format(Locale.US, "%.0f分钟", stats.totalMs / avgDiv.toDouble() / 60000.0)}", s(60f), y, h1)
-        c.drawText("本期合计: ${formatDuration(stats.totalMs, s0.timeUnit)}", w - s(560f), y, h1)
+        drawFittedText(c, "日均: ${String.format(Locale.US, "%.0f分钟", stats.totalMs / avgDiv.toDouble() / 60000.0)}", leftMargin, y, h1, (w * 0.38f), Paint.Align.LEFT, 0.72f)
+        drawFittedText(c, "本期合计: ${formatDuration(stats.totalMs, s0.timeUnit)}", rightEdge, y, h1, (w * 0.54f), Paint.Align.RIGHT, 0.72f)
 
         y += s(50f)
         val footerReserved = if (!hasFooter) 0f else if (s0.footerMode == "BARCODE") s(260f) else s(120f)
@@ -2332,7 +2344,7 @@ object AutoWallpaperGenerator {
             val baseY = if (s0.showChart) (chartBottomUsed + s(64f)) else (y + s(16f))
             c.drawLine(s(40f), baseY, w - s(40f), baseY, line)
             if (s0.footerMode == "NOTE") {
-                c.drawText("备注: ${shortTitle(s0.noteText, 40)}", s(60f), baseY + s(58f), text)
+                drawFittedText(c, "备注: ${s0.noteText}", leftMargin, baseY + s(58f), text, (rightEdge - leftMargin), Paint.Align.LEFT, 0.78f)
             } else if (s0.footerMode == "BARCODE") {
                 val qr = buildQrBitmap(s0.noteText, s(168f).toInt().coerceAtLeast(120))
                 if (qr != null) {
@@ -2345,15 +2357,63 @@ object AutoWallpaperGenerator {
                     val decorH = (qr.height - s(20f)).toFloat().coerceAtLeast(s(60f))
                     drawBarcodeDecor(c, decorX, decorY, decorW, decorH, s0.noteText, s0.barcodeWidthScale, s0.barcodeGapMode, black)
                     val textY = qrY + qr.height + s(34f)
-                    c.drawText(shortTitle(s0.noteText, 36), qrX, textY, mono)
+                    drawFittedText(c, s0.noteText, qrX, textY, mono, (rightEdge - qrX), Paint.Align.LEFT, 0.78f)
                 } else {
-                    c.drawText("二维码生成失败，备注: ${shortTitle(s0.noteText, 36)}", s(60f), baseY + s(58f), text)
+                    drawFittedText(c, "二维码生成失败，备注: ${s0.noteText}", leftMargin, baseY + s(58f), text, (rightEdge - leftMargin), Paint.Align.LEFT, 0.78f)
                 }
             }
         }
 
         drawSourceCornerMark(c, w, h, sourceMark, gs)
         return bmp
+    }
+
+    private fun drawFittedText(
+        canvas: Canvas,
+        raw: String,
+        x: Float,
+        y: Float,
+        paint: Paint,
+        maxWidth: Float,
+        align: Paint.Align = Paint.Align.LEFT,
+        minScale: Float = 0.72f
+    ) {
+        if (raw.isBlank() || maxWidth <= 0f) return
+        val originalTextSize = paint.textSize
+        val originalAlign = paint.textAlign
+        val safeMinScale = minScale.coerceIn(0.45f, 1f)
+        val minTextSize = originalTextSize * safeMinScale
+
+        var fitted = raw
+        if (paint.measureText(fitted) > maxWidth) {
+            val ratio = (maxWidth / paint.measureText(fitted)).coerceIn(safeMinScale, 1f)
+            paint.textSize = originalTextSize * ratio
+            if (paint.textSize < minTextSize) paint.textSize = minTextSize
+        }
+        fitted = ellipsizeToWidth(fitted, paint, maxWidth)
+        paint.textAlign = align
+        canvas.drawText(fitted, x, y, paint)
+        paint.textSize = originalTextSize
+        paint.textAlign = originalAlign
+    }
+
+    private fun ellipsizeToWidth(raw: String, paint: Paint, maxWidth: Float): String {
+        if (raw.isEmpty() || paint.measureText(raw) <= maxWidth) return raw
+        val ellipsis = "…"
+        val ellipsisWidth = paint.measureText(ellipsis)
+        if (ellipsisWidth >= maxWidth) return ellipsis
+        var lo = 0
+        var hi = raw.length
+        while (lo < hi) {
+            val mid = (lo + hi + 1) / 2
+            val candidate = raw.take(mid) + ellipsis
+            if (paint.measureText(candidate) <= maxWidth) {
+                lo = mid
+            } else {
+                hi = mid - 1
+            }
+        }
+        return raw.take(lo).trimEnd() + ellipsis
     }
 
     private fun resolveSerialNumber(s: AutoSettings): String {
