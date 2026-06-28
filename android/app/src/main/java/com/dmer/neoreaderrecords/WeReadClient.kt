@@ -70,6 +70,15 @@ object WeReadClient {
         val readSeconds: Long
     )
 
+    data class LatestNoteResult(
+        val ok: Boolean,
+        val bookId: String,
+        val text: String,
+        val type: String,
+        val createTimeMs: Long,
+        val detail: String
+    )
+
     data class ShelfBook(
         val bookKey: String,
         val title: String,
@@ -574,6 +583,75 @@ object WeReadClient {
             AutoRefreshLog.e(context, "WeRead book progress failed bookId=${bookId.take(10)}", e)
             BookProgressResult(false, null, 0L, 0L, "${e.javaClass.simpleName}: ${e.message ?: "读取失败"}")
         }
+    }
+
+    fun fetchLatestNote(context: Context, apiKey: String, bookId: String): LatestNoteResult {
+        val key = apiKey.trim()
+        if (key.isBlank()) return LatestNoteResult(false, bookId, "", "", 0L, "未配置 API Key")
+        if (bookId.isBlank()) return LatestNoteResult(false, bookId, "", "", 0L, "缺少 bookId")
+        data class Candidate(val text: String, val type: String, val createTimeMs: Long)
+        val candidates = mutableListOf<Candidate>()
+        try {
+            val bookmarkBody = JSONObject()
+                .put("api_name", "/book/bookmarklist")
+                .put("bookId", bookId)
+                .put("skill_version", SKILL_VERSION)
+                .toString()
+            val bookmarkResult = postJson(key, bookmarkBody)
+            AutoRefreshLog.i(context, "WeRead latest note bookmarks http bookId=${bookId.take(10)} code=${bookmarkResult.code} bytes=${bookmarkResult.body.length}")
+            if (bookmarkResult.code in 200..299) {
+                val json = JSONObject(bookmarkResult.body)
+                val upgradeInfo = json.optJSONObject("upgrade_info")
+                if (upgradeInfo != null) {
+                    return LatestNoteResult(false, bookId, "", "", 0L, "Skill 需要升级：${upgradeInfo.optString("message", "请升级 skill")}")
+                }
+                if (json.optInt("errcode", 0) == 0) {
+                    val updated = json.optJSONArray("updated")
+                    if (updated != null) {
+                        for (i in 0 until updated.length()) {
+                            val item = updated.optJSONObject(i) ?: continue
+                            val text = item.optString("markText", "").trim()
+                            val createTime = normalizeEpochMs(item.optLong("createTime", 0L))
+                            if (text.isNotBlank()) candidates.add(Candidate(text, "划线", createTime))
+                        }
+                    }
+                }
+            }
+
+            val reviewBody = JSONObject()
+                .put("api_name", "/review/list/mine")
+                .put("bookid", bookId)
+                .put("count", 20)
+                .put("skill_version", SKILL_VERSION)
+                .toString()
+            val reviewResult = postJson(key, reviewBody)
+            AutoRefreshLog.i(context, "WeRead latest note reviews http bookId=${bookId.take(10)} code=${reviewResult.code} bytes=${reviewResult.body.length}")
+            if (reviewResult.code in 200..299) {
+                val json = JSONObject(reviewResult.body)
+                val upgradeInfo = json.optJSONObject("upgrade_info")
+                if (upgradeInfo != null) {
+                    return LatestNoteResult(false, bookId, "", "", 0L, "Skill 需要升级：${upgradeInfo.optString("message", "请升级 skill")}")
+                }
+                if (json.optInt("errcode", 0) == 0) {
+                    val reviews = json.optJSONArray("reviews")
+                    if (reviews != null) {
+                        for (i in 0 until reviews.length()) {
+                            val review = reviews.optJSONObject(i)?.optJSONObject("review") ?: continue
+                            val text = review.optString("content", "").trim()
+                            val createTime = normalizeEpochMs(review.optLong("createTime", 0L))
+                            if (text.isNotBlank()) candidates.add(Candidate(text, "想法", createTime))
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            AutoRefreshLog.e(context, "WeRead latest note failed bookId=${bookId.take(10)}", e)
+            return LatestNoteResult(false, bookId, "", "", 0L, "${e.javaClass.simpleName}: ${e.message ?: "读取失败"}")
+        }
+        val latest = candidates.maxByOrNull { it.createTimeMs }
+            ?: return LatestNoteResult(true, bookId, "", "", 0L, "无可导出摘录")
+        AutoRefreshLog.i(context, "WeRead latest note success bookId=${bookId.take(10)} type=${latest.type} chars=${latest.text.length}")
+        return LatestNoteResult(true, bookId, latest.text, latest.type, latest.createTimeMs, latest.type)
     }
 
 
