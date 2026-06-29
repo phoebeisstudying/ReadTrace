@@ -46,7 +46,6 @@ object AutoWallpaperGenerator {
         val progressText: String? = null,
         val durationText: String? = null,
         val latestExcerptText: String? = null,
-        val latestExcerptType: String? = null,
         val menuPriceText: String? = null,
         val localKeys: List<String> = emptyList()
     )
@@ -1570,23 +1569,15 @@ object AutoWallpaperGenerator {
             } else if (fetchWeReadExcerpt && !priced.bookId.isNullOrBlank()) {
                 val note = WeReadClient.fetchLatestNote(context, apiKey, priced.bookId)
                 if (note.ok && note.text.isNotBlank()) {
-                    priced.copy(
-                        latestExcerptText = note.text,
-                        latestExcerptType = note.type
-                    )
+                    priced.copy(latestExcerptText = note.text)
                 } else {
                     priced
                 }
             } else if (priced.localKeys.isNotEmpty()) {
                 val note = fetchLatestLocalAnnotation(context, priced.localKeys)
                 if (note != null && note.text.isNotBlank()) {
-                    AutoRefreshLog.i(context, "Local latest annotation success keys=${priced.localKeys.take(4).joinToString("|") { it.take(12) }} type=${note.type} chars=${note.text.length}")
-                    priced.copy(
-                        latestExcerptText = note.text,
-                        latestExcerptType = note.type
-                    )
+                    priced.copy(latestExcerptText = note.text)
                 } else {
-                    AutoRefreshLog.i(context, "Local latest annotation empty keys=${priced.localKeys.take(4).joinToString("|") { it.take(12) }} title=${priced.title.take(40)}")
                     priced
                 }
             } else {
@@ -1597,7 +1588,6 @@ object AutoWallpaperGenerator {
 
     private data class LocalAnnotationResult(
         val text: String,
-        val type: String,
         val updatedAt: Long
     )
 
@@ -1639,13 +1629,12 @@ object AutoWallpaperGenerator {
                 val quote = col("quote").trim()
                 val text = note.ifBlank { quote }
                 if (text.isBlank()) continue
-                val type = if (note.isNotBlank()) "批注" else "划线"
                 val updatedAt = normalizeEpochMs(
                     col("updatedAt").toLongOrNull()
                         ?: col("createdAt").toLongOrNull()
                         ?: 0L
                 )
-                val current = LocalAnnotationResult(text, type, updatedAt)
+                val current = LocalAnnotationResult(text, updatedAt)
                 if (best == null || current.updatedAt > best!!.updatedAt) best = current
             }
             return best

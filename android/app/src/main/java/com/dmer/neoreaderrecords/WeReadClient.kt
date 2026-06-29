@@ -650,7 +650,6 @@ object WeReadClient {
         }
         val latest = candidates.maxByOrNull { it.createTimeMs }
             ?: return LatestNoteResult(true, bookId, "", "", 0L, "无可导出摘录")
-        AutoRefreshLog.i(context, "WeRead latest note success bookId=${bookId.take(10)} type=${latest.type} chars=${latest.text.length}")
         return LatestNoteResult(true, bookId, latest.text, latest.type, latest.createTimeMs, latest.type)
     }
 
