@@ -47,7 +47,8 @@ object AutoWallpaperGenerator {
         val durationText: String? = null,
         val latestExcerptText: String? = null,
         val latestExcerptType: String? = null,
-        val menuPriceText: String? = null
+        val menuPriceText: String? = null,
+        val localIdString: String? = null
     )
     private data class MetadataBook(
         val path: String,
@@ -641,11 +642,24 @@ object AutoWallpaperGenerator {
         }
         val range = resolvePeriodRange(s) ?: return null
         val books = if (s.sourceMode == "DURATION") {
-            queryTopBooksByDuration(context, range.first, range.second, s)
+            enrichExcerptMenuBooks(
+                context,
+                "",
+                queryTopBooksByDuration(context, range.first, range.second, s)
                 .take(s.topN)
-                .map { it.first.copy(menuPriceText = menuPriceText(it.second)) }
+                    .map { it.first.copy(menuPriceText = menuPriceText(it.second)) to it.second },
+                s,
+                fetchWeReadExcerpt = false
+            )
         } else {
-            queryTopBooks(context.contentResolver, range.first, range.second, s.topN, s.includeUnread, s.readingFilterMode)
+            enrichExcerptMenuBooks(
+                context,
+                "",
+                queryTopBooks(context.contentResolver, range.first, range.second, s.topN, s.includeUnread, s.readingFilterMode)
+                    .mapIndexed { idx, item -> item to ((s.topN - idx).coerceAtLeast(1) * 60_000L).toLong() },
+                s,
+                fetchWeReadExcerpt = false
+            )
         }
         val stats = queryStatsByMode(context.contentResolver, range.first, range.second, s)
         AutoRefreshLog.i(
@@ -1115,7 +1129,8 @@ object AutoWallpaperGenerator {
                             title = readColString(c, "title") ?: File(path).nameWithoutExtension.ifBlank { "未知书名" },
                             author = readColString(c, "authors"),
                             progress = readColString(c, "progress"),
-                            status = status
+                            status = status,
+                            localIdString = readColString(c, "idString")
                         )
                     )
                 )
@@ -1417,7 +1432,7 @@ object AutoWallpaperGenerator {
         val metadata = linkedMapOf<String, MetadataBook>()
         resolver.query(
             metadataUri,
-            arrayOf("nativeAbsolutePath", "title", "authors", "progress", "readingStatus", "lastAccess"),
+            arrayOf("nativeAbsolutePath", "title", "authors", "progress", "readingStatus", "lastAccess", "idString"),
             null,
             null,
             null
@@ -1437,7 +1452,8 @@ object AutoWallpaperGenerator {
                         c.getString(c.getColumnIndexOrThrow("title")) ?: File(path).nameWithoutExtension,
                         c.getString(c.getColumnIndexOrThrow("authors")),
                         c.getString(c.getColumnIndexOrThrow("progress")),
-                        status
+                        status,
+                        localIdString = c.getString(c.getColumnIndexOrThrow("idString"))
                     )
                 )
             }
@@ -1549,9 +1565,9 @@ object AutoWallpaperGenerator {
     ): List<BookItem> {
         return items.map { (book, scoreMs) ->
             val priced = book.copy(menuPriceText = menuPriceText(scoreMs))
-            if (s.statsTemplate != "EXCERPT_MENU" || !fetchWeReadExcerpt || priced.bookId.isNullOrBlank()) {
+            if (s.statsTemplate != "EXCERPT_MENU") {
                 priced
-            } else {
+            } else if (fetchWeReadExcerpt && !priced.bookId.isNullOrBlank()) {
                 val note = WeReadClient.fetchLatestNote(context, apiKey, priced.bookId)
                 if (note.ok && note.text.isNotBlank()) {
                     priced.copy(
@@ -1561,8 +1577,70 @@ object AutoWallpaperGenerator {
                 } else {
                     priced
                 }
+            } else if (!priced.localIdString.isNullOrBlank()) {
+                val note = fetchLatestLocalAnnotation(context, priced.localIdString)
+                if (note != null && note.text.isNotBlank()) {
+                    AutoRefreshLog.i(context, "Local latest annotation success idString=${priced.localIdString.take(12)} type=${note.type} chars=${note.text.length}")
+                    priced.copy(
+                        latestExcerptText = note.text,
+                        latestExcerptType = note.type
+                    )
+                } else {
+                    AutoRefreshLog.i(context, "Local latest annotation empty idString=${priced.localIdString.take(12)} title=${priced.title.take(40)}")
+                    priced
+                }
+            } else {
+                priced
             }
         }
+    }
+
+    private data class LocalAnnotationResult(
+        val text: String,
+        val type: String,
+        val updatedAt: Long
+    )
+
+    private fun fetchLatestLocalAnnotation(context: Context, localIdString: String): LocalAnnotationResult? {
+        val key = localIdString.trim()
+        if (key.isBlank()) return null
+        val uri = Uri.parse("content://com.onyx.content.database.ContentProvider/Annotation")
+        fun readFromCursor(c: android.database.Cursor): LocalAnnotationResult? {
+            var best: LocalAnnotationResult? = null
+            fun col(name: String): String {
+                val i = c.getColumnIndex(name)
+                if (i < 0 || c.isNull(i)) return ""
+                return runCatching { c.getString(i) ?: "" }.getOrDefault("")
+            }
+            while (c.moveToNext()) {
+                val rowIdString = col("idString")
+                if (rowIdString != key) continue
+                val note = col("note").ifBlank { col("linkNote") }.trim()
+                val quote = col("quote").trim()
+                val text = note.ifBlank { quote }
+                if (text.isBlank()) continue
+                val type = if (note.isNotBlank()) "批注" else "划线"
+                val updatedAt = normalizeEpochMs(
+                    col("updatedAt").toLongOrNull()
+                        ?: col("createdAt").toLongOrNull()
+                        ?: 0L
+                )
+                val current = LocalAnnotationResult(text, type, updatedAt)
+                if (best == null || current.updatedAt > best!!.updatedAt) best = current
+            }
+            return best
+        }
+        return runCatching {
+            context.contentResolver.query(
+                uri,
+                null,
+                "idString = ?",
+                arrayOf(key),
+                "updatedAt DESC"
+            )?.use { c -> readFromCursor(c) }
+        }.getOrNull() ?: runCatching {
+            context.contentResolver.query(uri, null, null, null, null)?.use { c -> readFromCursor(c) }
+        }.getOrNull()
     }
 
     private fun menuPriceText(durationMs: Long): String {
@@ -2711,7 +2789,7 @@ object AutoWallpaperGenerator {
         }
         resolver.query(
             metadataUri,
-            arrayOf("title", "authors", "progress", "readingStatus"),
+            arrayOf("title", "authors", "progress", "readingStatus", "idString"),
             selection,
             arrayOf(start.toString(), end.toString()),
             "readingStatus DESC, lastAccess DESC"
@@ -2723,7 +2801,8 @@ object AutoWallpaperGenerator {
                         c.getString(c.getColumnIndexOrThrow("title")) ?: "未知书名",
                         c.getString(c.getColumnIndexOrThrow("authors")),
                         c.getString(c.getColumnIndexOrThrow("progress")),
-                        c.getString(c.getColumnIndexOrThrow("readingStatus"))?.toIntOrNull() ?: 0
+                        c.getString(c.getColumnIndexOrThrow("readingStatus"))?.toIntOrNull() ?: 0,
+                        localIdString = c.getString(c.getColumnIndexOrThrow("idString"))
                     )
                 )
             }
