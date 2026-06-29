@@ -2388,8 +2388,14 @@ object AutoWallpaperGenerator {
         c.drawColor(Color.WHITE)
 
         val excerptMenu = s0.statsTemplate == "EXCERPT_MENU"
+        val maxExcerptLines = when {
+            !excerptMenu -> 0
+            books.size <= 3 -> 4
+            books.size <= 5 -> 3
+            else -> 2
+        }
         val bookLines = if (excerptMenu) {
-            books.sumOf { (80f + if (!it.latestExcerptText.isNullOrBlank()) 96f else 0f).toDouble() }.toFloat()
+            books.sumOf { (80f + if (!it.latestExcerptText.isNullOrBlank()) (54f + 42f * (maxExcerptLines - 1)) else 0f).toDouble() }.toFloat()
         } else {
             books.size * (80f + (if (s0.showAuthor) 42f else 0f) + (if (s0.showProgressStatus) 50f else 0f))
         }
@@ -2415,7 +2421,7 @@ object AutoWallpaperGenerator {
         val serialNumberPaint = Paint(black).apply { textSize = s(s0.serialNumberSize); typeface = Typeface.create(bodyFace, Typeface.BOLD) }
         val text = Paint(black).apply { textSize = s(s0.receiptBodySize); typeface = bodyFace }
         val mono = Paint(black).apply { textSize = s((s0.receiptBodySize * 0.88f).coerceIn(16f, 56f)); typeface = bodyFace }
-        val excerptPaint = Paint(black).apply { textSize = s((s0.receiptBodySize * 0.98f).coerceIn(18f, 64f)); typeface = Typeface.create(bodyFace, Typeface.BOLD) }
+        val excerptPaint = Paint(black).apply { textSize = s((s0.receiptBodySize * 0.98f).coerceIn(18f, 64f)); typeface = bodyFace }
         val line = Paint(black).apply { strokeWidth = s(3f) }
 
         val leftMargin = s(60f)
@@ -2481,7 +2487,7 @@ object AutoWallpaperGenerator {
                 val excerpt = b.latestExcerptText?.trim().orEmpty()
                 if (excerpt.isNotBlank()) {
                     y += s(58f)
-                    y = drawTwoLineText(c, "摘：$excerpt", titleX, y, excerptPaint, excerptColumnMaxWidth, s(42f))
+                    y = drawMultiLineText(c, "摘：$excerpt", titleX, y, excerptPaint, excerptColumnMaxWidth, s(42f), maxExcerptLines)
                 }
             } else {
                 drawFittedText(c, "1", qtyX, y, h1, s(84f), Paint.Align.CENTER, 0.8f)
@@ -2637,25 +2643,33 @@ object AutoWallpaperGenerator {
         paint.textAlign = originalAlign
     }
 
-    private fun drawTwoLineText(
+    private fun drawMultiLineText(
         canvas: Canvas,
         raw: String,
         x: Float,
         y: Float,
         paint: Paint,
         maxWidth: Float,
-        lineHeight: Float
+        lineHeight: Float,
+        maxLines: Int
     ): Float {
-        if (raw.isBlank() || maxWidth <= 0f) return y
+        if (raw.isBlank() || maxWidth <= 0f || maxLines <= 0) return y
         val originalAlign = paint.textAlign
         paint.textAlign = Paint.Align.LEFT
-        val first = takePrefixWithinWidth(raw, paint, maxWidth)
-        canvas.drawText(first.line, x, y, paint)
+        var rest = raw.trim()
         var lastY = y
-        val rest = first.rest.trimStart()
-        if (rest.isNotBlank()) {
-            lastY += lineHeight
-            canvas.drawText(ellipsizeToWidth(rest, paint, maxWidth), x, lastY, paint)
+        for (lineIndex in 0 until maxLines) {
+            if (rest.isBlank()) break
+            val isLastLine = lineIndex == maxLines - 1
+            val line = if (isLastLine) {
+                ellipsizeToWidth(rest, paint, maxWidth)
+            } else {
+                val split = takePrefixWithinWidth(rest, paint, maxWidth)
+                rest = split.rest.trimStart()
+                split.line
+            }
+            canvas.drawText(line, x, lastY, paint)
+            if (rest.isNotBlank() && !isLastLine) lastY += lineHeight
         }
         paint.textAlign = originalAlign
         return lastY
