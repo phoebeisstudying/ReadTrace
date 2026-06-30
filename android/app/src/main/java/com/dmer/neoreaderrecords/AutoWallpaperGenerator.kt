@@ -2581,7 +2581,7 @@ object AutoWallpaperGenerator {
                 drawFittedText(c, "备注: ${s0.noteText}", leftMargin, baseY + s(58f), text, (rightEdge - leftMargin), Paint.Align.LEFT, 0.78f)
             } else if (s0.footerMode == "BARCODE") {
                 val bottomSafeForFooter = (h - s(56f)).toFloat()
-                val footerAreaTop = baseY + if (excerptMenu) s(16f) else s(18f)
+                val footerAreaTop = baseY + if (excerptMenu) s(28f) else s(18f)
                 val footerAreaH = (bottomSafeForFooter - footerAreaTop - s(8f)).coerceAtLeast(s(56f))
                 val qrSize = if (excerptMenu) {
                     val minQr = maxOf(72f, s(64f))
@@ -2600,11 +2600,13 @@ object AutoWallpaperGenerator {
                         val decorW = minOf(availableDecorW, w * 0.62f).coerceAtLeast(minDecorW)
                         val groupW = qr.width + gap + decorW
                         val groupX = ((w - groupW) / 2f).coerceAtLeast(leftMargin)
-                        val qrY = footerAreaTop + ((footerAreaH - qr.height) / 2f).coerceAtLeast(0f)
                         val decorH = minOf(footerAreaH * 0.78f, qr.height * 1.02f, 152f)
                             .coerceAtLeast(maxOf(s(46f), minOf(footerAreaH * 0.52f, 68f)))
                         val decorX = groupX + qr.width + gap
-                        val decorY = footerAreaTop + ((footerAreaH - decorH) / 2f).coerceAtLeast(0f)
+                        val blockH = maxOf(qr.height.toFloat(), decorH)
+                        val blockTop = footerAreaTop
+                        val qrY = blockTop + ((blockH - qr.height) / 2f).coerceAtLeast(0f)
+                        val decorY = blockTop + ((blockH - decorH) / 2f).coerceAtLeast(0f)
                         c.drawBitmap(qr, groupX, qrY, null)
                         drawBarcodeDecor(c, decorX, decorY, decorW, decorH, s0.noteText, s0.barcodeWidthScale, s0.barcodeGapMode, black)
                     } else {
