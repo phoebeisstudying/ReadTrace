@@ -38,12 +38,16 @@ object AutoWallpaperGenerator {
     private val readingStoreSyncLock = Any()
 
     private data class BookItem(
+        val bookId: String?,
         val title: String,
         val author: String?,
         val progress: String?,
         val status: Int,
         val progressText: String? = null,
-        val durationText: String? = null
+        val durationText: String? = null,
+        val latestExcerptText: String? = null,
+        val menuPriceText: String? = null,
+        val localKeys: List<String> = emptyList()
     )
     private data class MetadataBook(
         val path: String,
@@ -114,6 +118,7 @@ object AutoWallpaperGenerator {
         val readingFilterMode: String,
         val sourceMode: String,
         val wallpaperMode: String,
+        val statsTemplate: String,
         val calendarStackOrder: String,
         val coverFitMode: String,
         val progressMode: String,
@@ -636,11 +641,24 @@ object AutoWallpaperGenerator {
         }
         val range = resolvePeriodRange(s) ?: return null
         val books = if (s.sourceMode == "DURATION") {
-            queryTopBooksByDuration(context, range.first, range.second, s)
+            enrichExcerptMenuBooks(
+                context,
+                "",
+                queryTopBooksByDuration(context, range.first, range.second, s)
                 .take(s.topN)
-                .map { it.first }
+                    .map { it.first.copy(menuPriceText = menuPriceText(it.second)) to it.second },
+                s,
+                fetchWeReadExcerpt = false
+            )
         } else {
-            queryTopBooks(context.contentResolver, range.first, range.second, s.topN, s.includeUnread, s.readingFilterMode)
+            enrichExcerptMenuBooks(
+                context,
+                "",
+                queryTopBooks(context.contentResolver, range.first, range.second, s.topN, s.includeUnread, s.readingFilterMode)
+                    .mapIndexed { idx, item -> item to ((s.topN - idx).coerceAtLeast(1) * 60_000L).toLong() },
+                s,
+                fetchWeReadExcerpt = false
+            )
         }
         val stats = queryStatsByMode(context.contentResolver, range.first, range.second, s)
         AutoRefreshLog.i(
@@ -1106,10 +1124,12 @@ object AutoWallpaperGenerator {
                         path = path,
                         lastAccessMs = normalizeEpochMs(readColString(c, "lastAccess")?.toLongOrNull() ?: 0L),
                         item = BookItem(
+                            bookId = null,
                             title = readColString(c, "title") ?: File(path).nameWithoutExtension.ifBlank { "未知书名" },
                             author = readColString(c, "authors"),
                             progress = readColString(c, "progress"),
-                            status = status
+                            status = status,
+                            localKeys = localBookKeys(c)
                         )
                     )
                 )
@@ -1212,10 +1232,17 @@ object AutoWallpaperGenerator {
             points = if (values.isNotEmpty()) values else longArrayOf(0L),
             labels = if (labels.isNotEmpty()) labels else listOf(weReadPeriodLabel(s.periodMode))
         )
-        val books = bookMap.values
-            .sortedByDescending { it.readSeconds }
-            .take(s.topN)
-            .map { toWeReadBookItem(context, key, it) }
+        val books = enrichExcerptMenuBooks(
+            context,
+            key,
+            bookMap.values
+                .sortedByDescending { it.readSeconds }
+                .map { toWeReadBookItem(context, key, it) to it.readSeconds * 1000L }
+                .filter { matchesReadingFilter(it.first, s) }
+                .take(s.topN),
+            s,
+            fetchWeReadExcerpt = true
+        )
         val note = if (monthStarts.size > 1 || s.periodMode != "LAST_30_DAYS") {
             "时长按日分桶精确过滤，书单按覆盖月份排行合并"
         } else {
@@ -1262,10 +1289,12 @@ object AutoWallpaperGenerator {
         val chart = bucketize(localEvents + weReadEvents, range.first, range.second, chooseBucketMode(s, range.first, range.second))
         val localBooks = queryTopBooksByDuration(context, range.first, range.second, s)
             .map { it.first to it.second }
-        val weReadBooks = weReadBookScores.values.map { (book, scoreMs) ->
-            toWeReadBookItem(context, key, book).copy(durationText = formatDuration(scoreMs, s.timeUnit)) to scoreMs
-        }
-        val mergedBooks = mergeScoredBooks(localBooks + weReadBooks, s.topN, s.timeUnit)
+        val weReadBooks = weReadBookScores.values
+            .map { (book, scoreMs) ->
+                toWeReadBookItem(context, key, book).copy(durationText = formatDuration(scoreMs, s.timeUnit), menuPriceText = menuPriceText(scoreMs)) to scoreMs
+            }
+            .filter { matchesReadingFilter(it.first, s) }
+        val mergedBooks = enrichExcerptMenuBooks(context, key, mergeScoredBooksWithScores(localBooks + weReadBooks, s.topN, s.timeUnit), s, fetchWeReadExcerpt = true)
         val note = buildString {
             append("本地+微信，图表按时间相加，书单按阅读时长合并排序")
             if (weReadFailures.isNotEmpty()) {
@@ -1405,7 +1434,7 @@ object AutoWallpaperGenerator {
         val metadata = linkedMapOf<String, MetadataBook>()
         resolver.query(
             metadataUri,
-            arrayOf("nativeAbsolutePath", "title", "authors", "progress", "readingStatus", "lastAccess"),
+            arrayOf("nativeAbsolutePath", "title", "authors", "progress", "readingStatus", "lastAccess", "idString", "digest", "hashTag", "uuid", "guid", "id"),
             null,
             null,
             null
@@ -1421,10 +1450,12 @@ object AutoWallpaperGenerator {
                     path = path,
                     lastAccessMs = normalizeEpochMs(c.getString(c.getColumnIndexOrThrow("lastAccess"))?.toLongOrNull() ?: 0L),
                     item = BookItem(
+                        null,
                         c.getString(c.getColumnIndexOrThrow("title")) ?: File(path).nameWithoutExtension,
                         c.getString(c.getColumnIndexOrThrow("authors")),
                         c.getString(c.getColumnIndexOrThrow("progress")),
-                        status
+                        status,
+                        localKeys = localBookKeys(c)
                     )
                 )
             }
@@ -1469,7 +1500,7 @@ object AutoWallpaperGenerator {
         ).mapIndexed { idx, item -> item to ((s.topN - idx).coerceAtLeast(1) * 60_000L).toLong() }
 
         return durationByPath.mapNotNull { (path, ms) ->
-            val item = metadata[path]?.item ?: BookItem(File(path).nameWithoutExtension, null, null, 1)
+            val item = metadata[path]?.item ?: BookItem(null, File(path).nameWithoutExtension, null, null, 1)
             item.copy(durationText = formatDuration(ms, s.timeUnit)) to ms
         }.sortedByDescending { it.second }
     }
@@ -1490,6 +1521,7 @@ object AutoWallpaperGenerator {
         }
         val durationSeconds = progress?.recordReadingSeconds?.takeIf { it > 0L } ?: book.readSeconds
         return BookItem(
+            bookId = book.bookId,
             title = book.title,
             author = book.author,
             progress = null,
@@ -1499,7 +1531,20 @@ object AutoWallpaperGenerator {
         )
     }
 
+    private fun matchesReadingFilter(book: BookItem, s: AutoSettings): Boolean {
+        if (!s.includeUnread && book.status == 0) return false
+        return when (s.readingFilterMode) {
+            "READING_ONLY" -> book.status == 1
+            "FINISHED_ONLY" -> book.status == 2
+            else -> true
+        }
+    }
+
     private fun mergeScoredBooks(items: List<Pair<BookItem, Long>>, limit: Int, unit: String): List<BookItem> {
+        return mergeScoredBooksWithScores(items, limit, unit).map { it.first }
+    }
+
+    private fun mergeScoredBooksWithScores(items: List<Pair<BookItem, Long>>, limit: Int, unit: String): List<Pair<BookItem, Long>> {
         val merged = linkedMapOf<String, Pair<BookItem, Long>>()
         items.forEach { (book, score) ->
             val key = "${book.title.trim()}|${book.author.orEmpty().trim()}"
@@ -1508,14 +1553,133 @@ object AutoWallpaperGenerator {
                 book to score
             } else {
                 val total = old.second + score
-                val base = if (old.first.progressText.isNullOrBlank() && !book.progressText.isNullOrBlank()) book else old.first
-                base.copy(durationText = formatDuration(total, unit)) to total
+                val progressBase = if (old.first.progressText.isNullOrBlank() && !book.progressText.isNullOrBlank()) book else old.first
+                val base = when {
+                    progressBase.bookId.isNullOrBlank() && !book.bookId.isNullOrBlank() -> book
+                    else -> progressBase
+                }
+                base.copy(durationText = formatDuration(total, unit), menuPriceText = menuPriceText(total)) to total
             }
         }
         return merged.values
             .sortedByDescending { it.second }
             .take(limit)
-            .map { it.first }
+            .map { (book, score) -> book.copy(menuPriceText = menuPriceText(score)) to score }
+    }
+
+    private fun enrichExcerptMenuBooks(
+        context: Context,
+        apiKey: String,
+        items: List<Pair<BookItem, Long>>,
+        s: AutoSettings,
+        fetchWeReadExcerpt: Boolean
+    ): List<BookItem> {
+        return items.map { (book, scoreMs) ->
+            val priced = book.copy(menuPriceText = menuPriceText(scoreMs))
+            if (s.statsTemplate != "EXCERPT_MENU") {
+                priced
+            } else if (fetchWeReadExcerpt && !priced.bookId.isNullOrBlank()) {
+                val note = WeReadClient.fetchLatestNote(context, apiKey, priced.bookId)
+                if (note.ok && note.text.isNotBlank()) {
+                    priced.copy(latestExcerptText = note.text)
+                } else {
+                    priced
+                }
+            } else if (priced.localKeys.isNotEmpty()) {
+                val note = fetchLatestLocalAnnotation(context, priced.localKeys)
+                if (note != null && note.text.isNotBlank()) {
+                    priced.copy(latestExcerptText = note.text)
+                } else {
+                    priced
+                }
+            } else {
+                priced
+            }
+        }
+    }
+
+    private data class LocalAnnotationResult(
+        val text: String,
+        val updatedAt: Long
+    )
+
+    private fun localBookKeys(c: android.database.Cursor): List<String> {
+        return listOf(
+            "idString",
+            "digest",
+            "hashTag",
+            "uuid",
+            "guid",
+            "id",
+            "nativeAbsolutePath"
+        ).mapNotNull { name ->
+            readColString(c, name)?.trim()?.takeIf { it.isNotBlank() }
+        }.distinct()
+    }
+
+    private fun fetchLatestLocalAnnotation(context: Context, localKeys: List<String>): LocalAnnotationResult? {
+        val keys = localKeys
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .toSet()
+        if (keys.isEmpty()) return null
+        val uri = Uri.parse("content://com.onyx.content.database.ContentProvider/Annotation")
+        fun readFromCursor(c: android.database.Cursor): LocalAnnotationResult? {
+            var best: LocalAnnotationResult? = null
+            fun col(name: String): String {
+                val i = c.getColumnIndex(name)
+                if (i < 0 || c.isNull(i)) return ""
+                return runCatching { c.getString(i) ?: "" }.getOrDefault("")
+            }
+            while (c.moveToNext()) {
+                val rowKeys = listOf(
+                    col("idString"),
+                    col("objId")
+                ).map { it.trim() }.filter { it.isNotBlank() }
+                if (rowKeys.none { it in keys }) continue
+                val note = col("note").ifBlank { col("linkNote") }.trim()
+                val quote = col("quote").trim()
+                val text = note.ifBlank { quote }
+                if (text.isBlank()) continue
+                val updatedAt = normalizeEpochMs(
+                    col("updatedAt").toLongOrNull()
+                        ?: col("createdAt").toLongOrNull()
+                        ?: 0L
+                )
+                val current = LocalAnnotationResult(text, updatedAt)
+                if (best == null || current.updatedAt > best!!.updatedAt) best = current
+            }
+            return best
+        }
+        return runCatching {
+            val queryKeys = keys.take(8)
+            val placeholders = queryKeys.joinToString(",") { "?" }
+            context.contentResolver.query(
+                uri,
+                null,
+                "idString IN ($placeholders) OR objId IN ($placeholders)",
+                (queryKeys + queryKeys).toTypedArray(),
+                "updatedAt DESC"
+            )?.use { c -> readFromCursor(c) }
+        }.getOrNull() ?: runCatching {
+            context.contentResolver.query(uri, null, null, null, null)?.use { c -> readFromCursor(c) }
+        }.getOrNull()
+    }
+
+    private fun menuPriceText(durationMs: Long): String {
+        val minutes = ((durationMs + 59_999L) / 60_000L).coerceAtLeast(1L)
+        val price = ((minutes + 9L) / 10L).coerceIn(1L, 999L)
+        return "¥$price"
+    }
+
+    private fun menuTotalPriceText(books: List<BookItem>): String {
+        val total = books.sumOf { book ->
+            book.menuPriceText
+                ?.filter { it.isDigit() }
+                ?.toIntOrNull()
+                ?: 1
+        }
+        return "¥$total"
     }
 
     private fun weReadPeriodLabel(periodMode: String): String {
@@ -2181,6 +2345,7 @@ object AutoWallpaperGenerator {
             readingFilterMode = p.getString("reading_filter_mode", "ALL") ?: "ALL",
             sourceMode = p.getString("source_mode", "DURATION") ?: "DURATION",
             wallpaperMode = p.getString("wallpaper_mode", "STATS") ?: "STATS",
+            statsTemplate = p.getString("stats_template", "RECEIPT") ?: "RECEIPT",
             calendarStackOrder = p.getString("calendar_stack_order", "LONGEST_TOP") ?: "LONGEST_TOP",
             coverFitMode = p.getString("cover_fit_mode", "FIT") ?: "FIT",
             progressMode = p.getString("progress_mode", "PAGES") ?: "PAGES",
@@ -2223,12 +2388,27 @@ object AutoWallpaperGenerator {
         val c = Canvas(bmp)
         c.drawColor(Color.WHITE)
 
-        val bookLines = books.size * (80f + (if (s0.showAuthor) 42f else 0f) + (if (s0.showProgressStatus) 50f else 0f))
+        val excerptMenu = s0.statsTemplate == "EXCERPT_MENU"
+        val maxExcerptLines = when {
+            !excerptMenu -> 0
+            books.size <= 3 -> 4
+            books.size <= 5 -> 3
+            else -> 2
+        }
+        val bookLines = if (excerptMenu) {
+            books.sumOf { (80f + if (!it.latestExcerptText.isNullOrBlank()) (54f + 42f * (maxExcerptLines - 1)) else 0f).toDouble() }.toFloat()
+        } else {
+            books.size * (80f + (if (s0.showAuthor) 42f else 0f) + (if (s0.showProgressStatus) 50f else 0f))
+        }
         val headerBlock = 110f + 30f + 250f + 48f + 28f
-        val summaryBlock = 30f + 60f + 50f
-        val chartBlock = if (s0.showChart) 260f else 0f
         val hasFooter = s0.footerMode != "NONE" && s0.noteText.isNotBlank()
-        val footerBlock = if (!hasFooter) 0f else if (s0.footerMode == "BARCODE") 280f else 130f
+        val hasExcerptMenuBarcodeFooter = excerptMenu && s0.footerMode == "BARCODE" && hasFooter
+        val summaryBlock = if (hasExcerptMenuBarcodeFooter) 30f + 52f + 54f + 30f else 30f + 60f + 50f
+        val drawChart = s0.showChart && !excerptMenu
+        val chartBlock = if (drawChart) 260f else 0f
+        val footerBlock = if (!hasFooter) 0f else if (s0.footerMode == "BARCODE") {
+            if (excerptMenu) 130f else 280f
+        } else 130f
         val requiredH = headerBlock + bookLines + summaryBlock + chartBlock + footerBlock + 120f
         val fitScale = (h.toFloat() - 40f) / requiredH
         val gs = fitScale.coerceIn(0.52f, 1f)
@@ -2242,6 +2422,7 @@ object AutoWallpaperGenerator {
         val serialNumberPaint = Paint(black).apply { textSize = s(s0.serialNumberSize); typeface = Typeface.create(bodyFace, Typeface.BOLD) }
         val text = Paint(black).apply { textSize = s(s0.receiptBodySize); typeface = bodyFace }
         val mono = Paint(black).apply { textSize = s((s0.receiptBodySize * 0.88f).coerceIn(16f, 56f)); typeface = bodyFace }
+        val excerptPaint = Paint(black).apply { textSize = s((s0.receiptBodySize * 0.98f).coerceIn(18f, 64f)); typeface = bodyFace }
         val line = Paint(black).apply { strokeWidth = s(3f) }
 
         val leftMargin = s(60f)
@@ -2255,7 +2436,18 @@ object AutoWallpaperGenerator {
         val titleX = s(260f)
         val qtyX = w - s(260f)
         val unitX = w - s(140f)
-        val titleColumnMaxWidth = (qtyX - titleX - s(28f)).coerceAtLeast(s(160f))
+        val chefX = w - s(245f)
+        val priceX = w - s(85f)
+        val titleColumnMaxWidth = if (excerptMenu) {
+            (chefX - titleX - s(52f)).coerceAtLeast(s(160f))
+        } else {
+            (qtyX - titleX - s(28f)).coerceAtLeast(s(160f))
+        }
+        val excerptColumnMaxWidth = if (excerptMenu) {
+            (chefX - titleX - s(52f)).coerceAtLeast(s(160f))
+        } else {
+            (rightEdge - titleX).coerceAtLeast(s(180f))
+        }
 
         var y = s(110f)
         drawFittedText(c, s0.receiptTitle, rightEdge, y, titlePaint, summaryWidth, Paint.Align.RIGHT, 0.62f)
@@ -2276,8 +2468,13 @@ object AutoWallpaperGenerator {
         c.drawLine(s(40f), y, w - s(40f), y, line)
         y += s(48f)
         c.drawText("品类", noX, y, text)
-        drawFittedText(c, "数量", qtyX, y, text, s(84f), Paint.Align.CENTER, 0.8f)
-        drawFittedText(c, "单位", unitX, y, text, s(84f), Paint.Align.CENTER, 0.8f)
+        if (excerptMenu) {
+            drawFittedText(c, "主厨", chefX, y, text, s(190f), Paint.Align.CENTER, 0.8f)
+            drawFittedText(c, "价格", priceX, y, text, s(90f), Paint.Align.CENTER, 0.8f)
+        } else {
+            drawFittedText(c, "数量", qtyX, y, text, s(84f), Paint.Align.CENTER, 0.8f)
+            drawFittedText(c, "单位", unitX, y, text, s(84f), Paint.Align.CENTER, 0.8f)
+        }
         y += s(28f)
         c.drawLine(s(40f), y, w - s(40f), y, line)
 
@@ -2285,36 +2482,58 @@ object AutoWallpaperGenerator {
             y += s(80f)
             c.drawText("NO.${(idx + 1).toString().padStart(2, '0')}", noX, y, h1)
             drawFittedText(c, b.title, titleX, y, h1, titleColumnMaxWidth, Paint.Align.LEFT, 0.68f)
-            drawFittedText(c, "1", qtyX, y, h1, s(84f), Paint.Align.CENTER, 0.8f)
-            drawFittedText(c, "本", unitX, y, h1, s(84f), Paint.Align.CENTER, 0.8f)
-            if (s0.showAuthor) {
-                y += s(42f)
-                drawFittedText(c, "作者:${b.author ?: "未知"}", titleX, y, mono, (rightEdge - titleX).coerceAtLeast(s(180f)), Paint.Align.LEFT, 0.78f)
-            }
-            if (s0.showProgressStatus) {
-                y += s(50f)
-                val st = when (b.status) { 2 -> "已读完"; 1 -> "阅读中"; else -> "未读" }
-                val value = b.progressText ?: formatProgress(b.progress, s0.progressMode)
-                val duration = if (s0.showBookDuration && !b.durationText.isNullOrBlank()) "  时长:${b.durationText}" else ""
-                drawFittedText(c, "进度:$value  状态:$st$duration", titleX, y, mono, (rightEdge - titleX).coerceAtLeast(s(180f)), Paint.Align.LEFT, 0.78f)
+            if (excerptMenu) {
+                drawFittedText(c, b.author ?: "未知", chefX, y, h1, s(215f), Paint.Align.CENTER, 0.62f)
+                drawFittedText(c, b.menuPriceText ?: "¥1", priceX, y, h1, s(90f), Paint.Align.CENTER, 0.72f)
+                val excerpt = b.latestExcerptText?.trim().orEmpty()
+                if (excerpt.isNotBlank()) {
+                    y += s(58f)
+                    y = drawMultiLineText(c, "摘：$excerpt", titleX, y, excerptPaint, excerptColumnMaxWidth, s(42f), maxExcerptLines)
+                }
+            } else {
+                drawFittedText(c, "1", qtyX, y, h1, s(84f), Paint.Align.CENTER, 0.8f)
+                drawFittedText(c, "本", unitX, y, h1, s(84f), Paint.Align.CENTER, 0.8f)
+                if (s0.showAuthor) {
+                    y += s(42f)
+                    drawFittedText(c, "作者:${b.author ?: "未知"}", titleX, y, mono, (rightEdge - titleX).coerceAtLeast(s(180f)), Paint.Align.LEFT, 0.78f)
+                }
+                if (s0.showProgressStatus) {
+                    y += s(50f)
+                    val st = when (b.status) { 2 -> "已读完"; 1 -> "阅读中"; else -> "未读" }
+                    val value = b.progressText ?: formatProgress(b.progress, s0.progressMode)
+                    val duration = if (s0.showBookDuration && !b.durationText.isNullOrBlank()) "  时长:${b.durationText}" else ""
+                    drawFittedText(c, "进度:$value  状态:$st$duration", titleX, y, mono, (rightEdge - titleX).coerceAtLeast(s(180f)), Paint.Align.LEFT, 0.78f)
+                }
             }
         }
 
         y += s(30f)
         c.drawLine(s(40f), y, w - s(40f), y, line)
-        y += s(60f)
-        val avgDiv = stats.points.size.coerceAtLeast(1)
-        drawFittedText(c, "日均: ${String.format(Locale.US, "%.0f分钟", stats.totalMs / avgDiv.toDouble() / 60000.0)}", leftMargin, y, h1, (w * 0.38f), Paint.Align.LEFT, 0.72f)
-        drawFittedText(c, "本期合计: ${formatDuration(stats.totalMs, s0.timeUnit)}", rightEdge, y, h1, (w * 0.54f), Paint.Align.RIGHT, 0.72f)
+        if (hasExcerptMenuBarcodeFooter) {
+            y += s(52f)
+            drawFittedText(c, "整单备注：${s0.noteText}", leftMargin, y, mono, (rightEdge - leftMargin), Paint.Align.LEFT, 0.72f)
+            y += s(54f)
+            drawFittedText(c, "账单合计: ${menuTotalPriceText(books)}", rightEdge, y, h1, (w * 0.56f), Paint.Align.RIGHT, 0.66f)
+        } else if (excerptMenu) {
+            y += s(60f)
+            drawFittedText(c, "账单合计: ${menuTotalPriceText(books)}", rightEdge, y, h1, (w * 0.54f), Paint.Align.RIGHT, 0.72f)
+        } else {
+            y += s(60f)
+            val avgDiv = stats.points.size.coerceAtLeast(1)
+            drawFittedText(c, "日均: ${String.format(Locale.US, "%.0f分钟", stats.totalMs / avgDiv.toDouble() / 60000.0)}", leftMargin, y, h1, (w * 0.38f), Paint.Align.LEFT, 0.72f)
+            drawFittedText(c, "本期合计: ${formatDuration(stats.totalMs, s0.timeUnit)}", rightEdge, y, h1, (w * 0.54f), Paint.Align.RIGHT, 0.72f)
+        }
 
-        y += s(50f)
-        val footerReserved = if (!hasFooter) 0f else if (s0.footerMode == "BARCODE") s(260f) else s(120f)
+        y += if (hasExcerptMenuBarcodeFooter) s(26f) else s(50f)
+        val footerReserved = if (!hasFooter) 0f else if (s0.footerMode == "BARCODE") {
+            if (excerptMenu) s(118f) else s(260f)
+        } else s(120f)
         val bottomSafe = (h - s(56f)).toFloat()
         val availableChartH = ((bottomSafe - footerReserved - s(24f)) - y).coerceAtLeast(s(70f))
         val maxChartBottom = y + availableChartH
         var chartBottomUsed = y
 
-        if (s0.showChart) {
+        if (drawChart) {
             val chartLeft = s(80f)
             val chartRight = (w - s(80f)).toFloat()
             val chartTop = y
@@ -2356,23 +2575,52 @@ object AutoWallpaperGenerator {
         }
 
         if (hasFooter) {
-            val baseY = if (s0.showChart) (chartBottomUsed + s(64f)) else (y + s(16f))
+            val baseY = if (drawChart) (chartBottomUsed + s(64f)) else if (hasExcerptMenuBarcodeFooter) y else (y + s(16f))
             c.drawLine(s(40f), baseY, w - s(40f), baseY, line)
             if (s0.footerMode == "NOTE") {
                 drawFittedText(c, "备注: ${s0.noteText}", leftMargin, baseY + s(58f), text, (rightEdge - leftMargin), Paint.Align.LEFT, 0.78f)
             } else if (s0.footerMode == "BARCODE") {
-                val qr = buildQrBitmap(s0.noteText, s(168f).toInt().coerceAtLeast(120))
+                val bottomSafeForFooter = (h - s(56f)).toFloat()
+                val footerAreaTop = baseY + if (excerptMenu) s(28f) else s(18f)
+                val footerAreaH = (bottomSafeForFooter - footerAreaTop - s(8f)).coerceAtLeast(s(56f))
+                val qrSize = if (excerptMenu) {
+                    val minQr = maxOf(72f, s(64f))
+                    val maxQr = minOf(184f, w * 0.145f, footerAreaH * 0.9f).coerceAtLeast(minQr)
+                    minOf(maxQr, footerAreaH * 0.82f).coerceAtLeast(minQr).toInt()
+                } else {
+                    s(168f).toInt().coerceAtLeast(120)
+                }
+                val qr = buildQrBitmap(s0.noteText, qrSize)
                 if (qr != null) {
-                    val qrX = s(60f)
-                    val qrY = baseY + s(18f)
-                    c.drawBitmap(qr, qrX, qrY, null)
-                    val decorX = qrX + qr.width + s(24f)
-                    val decorY = qrY + s(10f)
-                    val decorW = (w - decorX - s(60f)).coerceAtLeast(s(220f))
-                    val decorH = (qr.height - s(20f)).toFloat().coerceAtLeast(s(60f))
-                    drawBarcodeDecor(c, decorX, decorY, decorW, decorH, s0.noteText, s0.barcodeWidthScale, s0.barcodeGapMode, black)
-                    val textY = qrY + qr.height + s(34f)
-                    drawFittedText(c, s0.noteText, qrX, textY, mono, (rightEdge - qrX), Paint.Align.LEFT, 0.78f)
+                    if (excerptMenu) {
+                        val gap = maxOf(s(24f), w * 0.018f)
+                        val maxGroupW = (rightEdge - leftMargin).coerceAtLeast(s(260f))
+                        val availableDecorW = (maxGroupW - qr.width - gap).coerceAtLeast(w * 0.32f)
+                        val minDecorW = minOf(availableDecorW, maxOf(s(180f), w * 0.42f))
+                        val decorW = minOf(availableDecorW, w * 0.62f).coerceAtLeast(minDecorW)
+                        val groupW = qr.width + gap + decorW
+                        val groupX = ((w - groupW) / 2f).coerceAtLeast(leftMargin)
+                        val decorH = minOf(footerAreaH * 0.78f, qr.height * 1.02f, 152f)
+                            .coerceAtLeast(maxOf(s(46f), minOf(footerAreaH * 0.52f, 68f)))
+                        val decorX = groupX + qr.width + gap
+                        val blockH = maxOf(qr.height.toFloat(), decorH)
+                        val blockTop = footerAreaTop
+                        val qrY = blockTop + ((blockH - qr.height) / 2f).coerceAtLeast(0f)
+                        val decorY = blockTop + ((blockH - decorH) / 2f).coerceAtLeast(0f)
+                        c.drawBitmap(qr, groupX, qrY, null)
+                        drawBarcodeDecor(c, decorX, decorY, decorW, decorH, s0.noteText, s0.barcodeWidthScale, s0.barcodeGapMode, black)
+                    } else {
+                        val qrX = s(60f)
+                        val qrY = baseY + s(18f)
+                        c.drawBitmap(qr, qrX, qrY, null)
+                        val decorX = qrX + qr.width + s(24f)
+                        val decorY = qrY + s(10f)
+                        val decorW = (w - decorX - s(60f)).coerceAtLeast(s(220f))
+                        val decorH = (qr.height - s(20f)).toFloat().coerceAtLeast(s(60f))
+                        drawBarcodeDecor(c, decorX, decorY, decorW, decorH, s0.noteText, s0.barcodeWidthScale, s0.barcodeGapMode, black)
+                        val textY = qrY + qr.height + s(34f)
+                        drawFittedText(c, s0.noteText, qrX, textY, mono, (rightEdge - qrX), Paint.Align.LEFT, 0.78f)
+                    }
                 } else {
                     drawFittedText(c, "二维码生成失败，备注: ${s0.noteText}", leftMargin, baseY + s(58f), text, (rightEdge - leftMargin), Paint.Align.LEFT, 0.78f)
                 }
@@ -2410,6 +2658,59 @@ object AutoWallpaperGenerator {
         canvas.drawText(fitted, x, y, paint)
         paint.textSize = originalTextSize
         paint.textAlign = originalAlign
+    }
+
+    private fun drawMultiLineText(
+        canvas: Canvas,
+        raw: String,
+        x: Float,
+        y: Float,
+        paint: Paint,
+        maxWidth: Float,
+        lineHeight: Float,
+        maxLines: Int
+    ): Float {
+        if (raw.isBlank() || maxWidth <= 0f || maxLines <= 0) return y
+        val originalAlign = paint.textAlign
+        paint.textAlign = Paint.Align.LEFT
+        var rest = raw.trim()
+        var lastY = y
+        for (lineIndex in 0 until maxLines) {
+            if (rest.isBlank()) break
+            val isLastLine = lineIndex == maxLines - 1
+            val line = if (isLastLine) {
+                ellipsizeToWidth(rest, paint, maxWidth)
+            } else {
+                val split = takePrefixWithinWidth(rest, paint, maxWidth)
+                rest = split.rest.trimStart()
+                split.line
+            }
+            canvas.drawText(line, x, lastY, paint)
+            if (rest.isNotBlank() && !isLastLine) lastY += lineHeight
+        }
+        paint.textAlign = originalAlign
+        return lastY
+    }
+
+    private data class TextSplit(val line: String, val rest: String)
+
+    private fun takePrefixWithinWidth(raw: String, paint: Paint, maxWidth: Float): TextSplit {
+        if (raw.isEmpty() || paint.measureText(raw) <= maxWidth) return TextSplit(raw, "")
+        var lo = 1
+        var hi = raw.length
+        while (lo < hi) {
+            val mid = (lo + hi + 1) / 2
+            if (paint.measureText(raw.take(mid)) <= maxWidth) {
+                lo = mid
+            } else {
+                hi = mid - 1
+            }
+        }
+        val splitEnd = raw.take(lo).lastIndexOfAny(charArrayOf(' ', '，', '。', '、', '；', '：', ',', '.', ';', ':'))
+            .takeIf { it >= 4 }
+            ?.let { it + 1 }
+            ?: lo
+        return TextSplit(raw.take(splitEnd).trimEnd(), raw.drop(splitEnd).trimStart())
     }
 
     private fun ellipsizeToWidth(raw: String, paint: Paint, maxWidth: Float): String {
@@ -2619,7 +2920,7 @@ object AutoWallpaperGenerator {
         }
         resolver.query(
             metadataUri,
-            arrayOf("title", "authors", "progress", "readingStatus"),
+            arrayOf("title", "authors", "progress", "readingStatus", "idString", "digest", "hashTag", "uuid", "guid", "id", "nativeAbsolutePath"),
             selection,
             arrayOf(start.toString(), end.toString()),
             "readingStatus DESC, lastAccess DESC"
@@ -2627,10 +2928,12 @@ object AutoWallpaperGenerator {
             while (c.moveToNext() && list.size < limit) {
                 list.add(
                     BookItem(
+                        null,
                         c.getString(c.getColumnIndexOrThrow("title")) ?: "未知书名",
                         c.getString(c.getColumnIndexOrThrow("authors")),
                         c.getString(c.getColumnIndexOrThrow("progress")),
-                        c.getString(c.getColumnIndexOrThrow("readingStatus"))?.toIntOrNull() ?: 0
+                        c.getString(c.getColumnIndexOrThrow("readingStatus"))?.toIntOrNull() ?: 0,
+                        localKeys = localBookKeys(c)
                     )
                 )
             }
