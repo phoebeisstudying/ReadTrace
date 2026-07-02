@@ -161,9 +161,13 @@ object AutoWallpaperGenerator {
         AutoRefreshLog.i(context, "Generator start reason=$reason")
         return runCatching {
             val built = buildPreviewInternal(context, "A", true) ?: return false
-            val path = saveBitmap(context, built.bitmap)
+            val path = runCatching { WallpaperStorage.save(context, built.bitmap) }.getOrNull()
+            val iReaderPath = runCatching { WallpaperStorage.saveIReaderCacheFromPrefs(context, built.bitmap) }.getOrNull()
+            val skinPath = runCatching { WallpaperStorage.saveIReaderSkinFromPrefs(context, built.bitmap) }.getOrNull()
             AutoRefreshLog.i(context, "Generator saved path=$path ${built.summary}")
-            true
+            if (iReaderPath != null) AutoRefreshLog.i(context, "Generator mirrored iReader cache uri=$iReaderPath")
+            if (skinPath != null) AutoRefreshLog.i(context, "Generator mirrored iReader skin uri=$skinPath")
+            path != null || iReaderPath != null || skinPath != null
         }.getOrElse {
             AutoRefreshLog.e(context, "Generator exception", it)
             false
@@ -182,9 +186,13 @@ object AutoWallpaperGenerator {
                 AutoRefreshLog.i(context, "WeRead auto skip saving fallback cache and request retry ${built.summary}")
                 return false
             }
-            val path = saveBitmap(context, built.bitmap)
+            val path = runCatching { WallpaperStorage.save(context, built.bitmap) }.getOrNull()
+            val iReaderPath = runCatching { WallpaperStorage.saveIReaderCacheFromPrefs(context, built.bitmap) }.getOrNull()
+            val skinPath = runCatching { WallpaperStorage.saveIReaderSkinFromPrefs(context, built.bitmap) }.getOrNull()
             AutoRefreshLog.i(context, "WeRead auto saved path=$path ${built.summary}")
-            true
+            if (iReaderPath != null) AutoRefreshLog.i(context, "WeRead auto mirrored iReader cache uri=$iReaderPath")
+            if (skinPath != null) AutoRefreshLog.i(context, "WeRead auto mirrored iReader skin uri=$skinPath")
+            path != null || iReaderPath != null || skinPath != null
         }.getOrElse {
             AutoRefreshLog.e(context, "WeRead auto generator exception", it)
             false
@@ -205,9 +213,13 @@ object AutoWallpaperGenerator {
                 AutoRefreshLog.i(context, "Mixed auto skip saving fallback cache and request retry ${built.summary}")
                 return false
             }
-            val path = saveBitmap(context, built.bitmap)
+            val path = runCatching { WallpaperStorage.save(context, built.bitmap) }.getOrNull()
+            val iReaderPath = runCatching { WallpaperStorage.saveIReaderCacheFromPrefs(context, built.bitmap) }.getOrNull()
+            val skinPath = runCatching { WallpaperStorage.saveIReaderSkinFromPrefs(context, built.bitmap) }.getOrNull()
             AutoRefreshLog.i(context, "Mixed auto saved path=$path ${built.summary}")
-            true
+            if (iReaderPath != null) AutoRefreshLog.i(context, "Mixed auto mirrored iReader cache uri=$iReaderPath")
+            if (skinPath != null) AutoRefreshLog.i(context, "Mixed auto mirrored iReader skin uri=$skinPath")
+            path != null || iReaderPath != null || skinPath != null
         }.getOrElse {
             AutoRefreshLog.e(context, "Mixed auto generator exception", it)
             false
@@ -3162,20 +3174,4 @@ object AutoWallpaperGenerator {
         return String.format(Locale.US, "%.1f%%", (cur / total) * 100.0)
     }
 
-    private fun saveBitmap(context: android.content.Context, bitmap: Bitmap): String {
-        val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "NeoReader")
-        if (!dir.exists()) dir.mkdirs()
-        val file = File(dir, "neoreader_wallpaper.png")
-        FileOutputStream(file).use { out -> bitmap.compress(Bitmap.CompressFormat.PNG, 100, out) }
-        runCatching {
-            android.media.MediaScannerConnection.scanFile(
-                context,
-                arrayOf(file.absolutePath),
-                arrayOf("image/png")
-            ) { path, uri ->
-                AutoRefreshLog.i(context, "MediaScanner scanned updated image: uri=$uri")
-            }
-        }
-        return file.absolutePath
-    }
 }

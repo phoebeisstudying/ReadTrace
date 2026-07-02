@@ -1,6 +1,5 @@
 package com.dmer.neoreaderrecords
 
-import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -44,7 +43,6 @@ import com.google.zxing.EncodeHintType
 import com.google.zxing.MultiFormatWriter
 import com.google.zxing.common.BitMatrix
 import java.io.File
-import java.io.FileOutputStream
 import java.io.FileWriter
 import java.net.HttpURLConnection
 import java.net.URL
@@ -111,6 +109,10 @@ class MainActivity : ComponentActivity() {
     private lateinit var autoMinIntervalInput: EditText
     private lateinit var autoModeHintText: TextView
     private lateinit var autoStateText: TextView
+    private lateinit var iReaderCacheText: TextView
+    private lateinit var iReaderSkinText: TextView
+    private lateinit var iReaderSkinTreeText: TextView
+    private lateinit var iReaderSkinFileNameInput: EditText
     private lateinit var updateStatusText: TextView
     private lateinit var wereadApiKeyInput: EditText
     private lateinit var wereadStatsModeGroup: RadioGroup
@@ -150,6 +152,9 @@ class MainActivity : ComponentActivity() {
     private var lastWeReadWallpaperDebug: String = ""
     private val debugLogName = "neoreader_debug_log.txt"
     private var selectedFontDirUri: String? = null
+    private var selectedIReaderCacheUri: String? = null
+    private var selectedIReaderSkinUri: String? = null
+    private var selectedIReaderSkinTreeUri: String? = null
 
     private val pickFontTreeLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) {
@@ -165,6 +170,30 @@ class MainActivity : ComponentActivity() {
             reloadFontsFromSources()
             writeDebugLog("font_tree_selected")
             applySettingsPreview()
+        }
+    }
+
+    private val pickIReaderSkinTreeLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) {
+            var permissionDebug = ""
+            try {
+                val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                contentResolver.takePersistableUriPermission(uri, flags)
+                permissionDebug = "persist=ok"
+            } catch (e: Exception) {
+                permissionDebug = "persist=fail ${e.javaClass.simpleName}:${e.message}"
+            }
+            selectedIReaderSkinTreeUri = uri.toString()
+            getSharedPreferences("wallpaper_settings", Context.MODE_PRIVATE)
+                .edit()
+                .putString(WallpaperStorage.PREF_KEY_IREADER_SKIN_TREE_URI, selectedIReaderSkinTreeUri)
+                .apply()
+            if (::iReaderSkinTreeText.isInitialized) iReaderSkinTreeText.text = iReaderSkinTreeLabel()
+            changeStateText.text = "状态: 已选择 Skin 目录（$permissionDebug）"
+            writeDebugLog("ireader_skin_tree_selected")
+        } else {
+            changeStateText.text = "状态: 未选择 Skin 目录"
+            writeDebugLog("ireader_skin_tree_select_empty")
         }
     }
 
@@ -335,6 +364,9 @@ class MainActivity : ComponentActivity() {
         isInitializingUi = true
         val prefs = getSharedPreferences("wallpaper_settings", Context.MODE_PRIVATE)
         selectedFontDirUri = prefs.getString("font_tree_uri", null)
+        selectedIReaderCacheUri = prefs.getString(WallpaperStorage.PREF_KEY_IREADER_CACHE_URI, null)
+        selectedIReaderSkinUri = prefs.getString(WallpaperStorage.PREF_KEY_IREADER_SKIN_URI, null)
+        selectedIReaderSkinTreeUri = prefs.getString(WallpaperStorage.PREF_KEY_IREADER_SKIN_TREE_URI, null)
         systemFonts.clear()
         systemFonts.addAll(loadSystemFonts())
         selectedWeekStartYmd = prefs.getString("week_start", currentWeekStartYmd()) ?: currentWeekStartYmd()
@@ -543,6 +575,47 @@ class MainActivity : ComponentActivity() {
         } else {
             BooxDevicePresets.byKey(settings.booxDevicePreset).displayText()
         }
+    }
+
+    private fun iReaderCacheLabel(): String {
+        val uri = selectedIReaderCacheUri
+        return if (uri.isNullOrBlank()) "未选择 ▼" else "已选择 ▼"
+    }
+
+    private fun iReaderSkinLabel(): String {
+        val uri = selectedIReaderSkinUri
+        return if (uri.isNullOrBlank()) "未选择 ▼" else "已选择 ▼"
+    }
+
+    private fun iReaderSkinTreeLabel(): String {
+        val uri = selectedIReaderSkinTreeUri
+        return if (uri.isNullOrBlank()) "未选择 ▼" else "已选择 ▼"
+    }
+
+    private fun openIReaderCachePicker() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        }
+        pickIReaderCacheLauncher.launch(intent)
+    }
+
+    private fun openIReaderSkinPicker() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        }
+        pickIReaderSkinLauncher.launch(intent)
+    }
+
+    private fun openIReaderSkinTreePicker() {
+        pickIReaderSkinTreeLauncher.launch(null)
     }
 
     private fun buildSettingsPage(prefs: android.content.SharedPreferences): View {
@@ -1128,6 +1201,7 @@ class MainActivity : ComponentActivity() {
         yAxisMaxInput = makeInput(prefs.getInt("y_axis_fixed_max_minutes", 300).toString())
         autoDailyTimeInput = makeInput(prefs.getString(AutoRefreshConfig.KEY_DAILY_TIME, "22:30") ?: "22:30")
         autoMinIntervalInput = makeInput(prefs.getInt(AutoRefreshConfig.KEY_SCREEN_OFF_MIN_INTERVAL, 3).toString())
+        iReaderSkinFileNameInput = makeInput(prefs.getString(WallpaperStorage.PREF_KEY_IREADER_SKIN_FILE_NAME, "") ?: "")
         titleFontSpinner = buildFontSpinner("title_font", "SERIF_BOLD")
         bodyFontSpinner = buildFontSpinner("body_font", "MONO")
 
@@ -1253,6 +1327,65 @@ class MainActivity : ComponentActivity() {
             root.addView(this)
         }
         val autoWarningText = addHint("提示：熄屏触发会增加唤醒次数与耗电；NeoReader 常在退出当前书籍/会话落库后才更新元数据，所以可能出现“本次锁屏仍是旧封面、下次锁屏生效”的现象。")
+
+        addSectionTitle("掌阅缓存覆盖", "可选：把生成结果额外写入掌阅自定义壁纸缓存文件")
+        val iReaderCacheRow = bindInputRow("选择掌阅缓存文件", { iReaderCacheLabel() }) {
+            openIReaderCachePicker()
+        }.first
+        iReaderCacheText = iReaderCacheRow.getChildAt(1) as TextView
+        addHint("说明：先在掌阅系统里把当前壁纸加入自定义壁纸列表，再在这里选择对应的无后缀缓存文件。之后每次生成壁纸会额外用 JPEG 覆盖该缓存文件。")
+        root.addView(Button(this).apply {
+            text = "清除掌阅缓存文件授权"
+            setOnClickListener {
+                selectedIReaderCacheUri = null
+                getSharedPreferences("wallpaper_settings", Context.MODE_PRIVATE)
+                    .edit()
+                    .remove(WallpaperStorage.PREF_KEY_IREADER_CACHE_URI)
+                    .apply()
+                if (::iReaderCacheText.isInitialized) iReaderCacheText.text = iReaderCacheLabel()
+                changeStateText.text = "状态: 已清除掌阅缓存文件"
+                writeDebugLog("ireader_cache_cleared")
+            }
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 0, 24) })
+
+        addSectionTitle("掌阅 Skin 覆盖", "推荐：覆盖一个已经能显示的品牌屏保图片文件")
+        val iReaderSkinTreeRow = bindInputRow("选择 Skin 目录", { iReaderSkinTreeLabel() }) {
+            openIReaderSkinTreePicker()
+        }.first
+        iReaderSkinTreeText = iReaderSkinTreeRow.getChildAt(1) as TextView
+        val iReaderSkinFileNameRow = bindEditRow("覆盖文件名", iReaderSkinFileNameInput)
+        iReaderSkinFileNameInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                getSharedPreferences("wallpaper_settings", Context.MODE_PRIVATE)
+                    .edit()
+                    .putString(WallpaperStorage.PREF_KEY_IREADER_SKIN_FILE_NAME, s?.toString()?.trim().orEmpty())
+                    .apply()
+            }
+            override fun afterTextChanged(s: Editable?) {}
+        })
+        addHint("推荐：选择已有品牌目录，再填写目录中一张已经能显示的图片文件名，例如 001.jpg。生成壁纸时会覆盖这个已有文件。")
+        val iReaderSkinRow = bindInputRow("选择品牌图文件", { iReaderSkinLabel() }) {
+            openIReaderSkinPicker()
+        }.first
+        iReaderSkinText = iReaderSkinRow.getChildAt(1) as TextView
+        addHint("备用：如果单文件选择一直转圈不返回，就使用上面的目录+文件名方式。新增文件或新增目录通常不会被掌阅识别。")
+        root.addView(Button(this).apply {
+            text = "清除 Skin 授权"
+            setOnClickListener {
+                selectedIReaderSkinUri = null
+                selectedIReaderSkinTreeUri = null
+                getSharedPreferences("wallpaper_settings", Context.MODE_PRIVATE)
+                    .edit()
+                    .remove(WallpaperStorage.PREF_KEY_IREADER_SKIN_URI)
+                    .remove(WallpaperStorage.PREF_KEY_IREADER_SKIN_TREE_URI)
+                    .apply()
+                if (::iReaderSkinText.isInitialized) iReaderSkinText.text = iReaderSkinLabel()
+                if (::iReaderSkinTreeText.isInitialized) iReaderSkinTreeText.text = iReaderSkinTreeLabel()
+                changeStateText.text = "状态: 已清除 Skin 授权"
+                writeDebugLog("ireader_skin_cleared")
+            }
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 0, 24) })
 
         addSectionTitle("微信读书", "配置 API Key，支持手动生成与解锁预热刷新")
         wereadApiKeyInput = makeInput(WeReadClient.loadApiKey(this))
@@ -1669,10 +1802,16 @@ class MainActivity : ComponentActivity() {
         val (bmp, result) = renderWallpaperPreview(settings)
         previewBitmap = bmp
         previewPresetText = wallpaperSizeDisplayText(settings)
-        val saved = saveBitmapToPictures(bmp)
-        lastSavedPath = saved
-        statusText.text = "已生成并覆盖文件\n$result\n路径: $saved"
-        changeStateText.text = "状态: 已生成并保存｜尺寸: $previewPresetText"
+        val saved = saveBitmapToPicturesOrReport(bmp)
+        val iReaderStatus = saveIReaderCacheStatus(bmp)
+        val skinStatus = saveIReaderSkinStatus(bmp)
+        if (saved.path != null) lastSavedPath = saved.path
+        statusText.text = "已生成并保存\n$result\n${saved.statusLine}$iReaderStatus$skinStatus"
+        changeStateText.text = if (saved.path != null || isIReaderOverwriteSuccess(iReaderStatus, skinStatus)) {
+            "状态: 已生成并保存｜尺寸: $previewPresetText"
+        } else {
+            "状态: 保存失败"
+        }
         refreshPreview()
         showPreviewPage()
         writeDebugLog("generated_saved")
@@ -1942,13 +2081,19 @@ class MainActivity : ComponentActivity() {
             runOnUiThread {
                 isTestingWeRead = false
                 if (preview != null) {
-                    val saved = saveBitmapToPictures(preview.bitmap)
+                    val saved = saveBitmapToPicturesOrReport(preview.bitmap)
+                    val iReaderStatus = saveIReaderCacheStatus(preview.bitmap)
+                    val skinStatus = saveIReaderSkinStatus(preview.bitmap)
                     previewBitmap = preview.bitmap
-                    lastSavedPath = saved
+                    if (saved.path != null) lastSavedPath = saved.path
                     previewPresetText = wallpaperSizeDisplayText(readSettingsFromUi())
-                    statusText.text = "${sourceLabel}壁纸已生成并覆盖文件\n${preview.summary}\n路径: $saved"
-                    changeStateText.text = "状态: ${sourceLabel}壁纸已生成并保存｜尺寸: $previewPresetText"
-                    lastWeReadWallpaperDebug = "ok=true, period=$periodLabel, saved=$saved, summary=${preview.summary}"
+                    statusText.text = "${sourceLabel}壁纸已生成并保存\n${preview.summary}\n${saved.statusLine}$iReaderStatus$skinStatus"
+                    changeStateText.text = if (saved.path != null || isIReaderOverwriteSuccess(iReaderStatus, skinStatus)) {
+                        "状态: ${sourceLabel}壁纸已生成并保存｜尺寸: $previewPresetText"
+                    } else {
+                        "状态: ${sourceLabel}壁纸保存失败"
+                    }
+                    lastWeReadWallpaperDebug = "ok=true, period=$periodLabel, saved=${saved.path ?: "<failed>"}, summary=${preview.summary}"
                     refreshPreview()
                     showPreviewPage()
                 } else {
@@ -2677,19 +2822,119 @@ class MainActivity : ComponentActivity() {
         return result.distinct()
     }
 
-    private fun saveBitmapToPictures(bitmap: Bitmap): String {
-        val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "NeoReader")
-        if (!dir.exists()) dir.mkdirs()
-        val file = File(dir, "neoreader_wallpaper.png")
-        FileOutputStream(file).use { out -> bitmap.compress(Bitmap.CompressFormat.PNG, 100, out) }
-        runCatching {
-            android.media.MediaScannerConnection.scanFile(
-                this,
-                arrayOf(file.absolutePath),
-                arrayOf("image/png")
-            ) { _, _ -> }
+    private data class WallpaperSaveAttempt(val path: String?, val statusLine: String)
+
+    private fun saveBitmapToPicturesOrReport(bitmap: Bitmap): WallpaperSaveAttempt {
+        return runCatching {
+            WallpaperStorage.save(this, bitmap)
+        }.fold(
+            onSuccess = { WallpaperSaveAttempt(it, "路径: $it") },
+            onFailure = {
+                val msg = it.message ?: it.javaClass.simpleName
+                statusText.text = "壁纸生成成功，但保存失败\n$msg"
+                changeStateText.text = "状态: 保存失败"
+                writeDebugLog("save_wallpaper_failed")
+                WallpaperSaveAttempt(null, "普通保存: 失败 $msg")
+            }
+        )
+    }
+
+    private fun saveIReaderCacheStatus(bitmap: Bitmap): String {
+        val uri = selectedIReaderCacheUri?.takeIf { it.isNotBlank() } ?: return ""
+        return runCatching {
+            WallpaperStorage.saveIReaderCache(this, bitmap, uri)
+            writeDebugLog("ireader_cache_saved")
+            "\n掌阅缓存: 已覆盖"
+        }.getOrElse {
+            val msg = it.message ?: it.javaClass.simpleName
+            writeDebugLog("ireader_cache_save_failed")
+            "\n掌阅缓存: 覆盖失败 $msg"
         }
-        return file.absolutePath
+    }
+
+    private fun saveIReaderSkinStatus(bitmap: Bitmap): String {
+        selectedIReaderSkinTreeUri?.takeIf { it.isNotBlank() }?.let { treeUri ->
+            val fileName = iReaderSkinFileNameInput.text?.toString()?.trim().orEmpty()
+            if (fileName.isBlank()) return "\nSkin 覆盖: 失败 请填写覆盖文件名"
+            getSharedPreferences("wallpaper_settings", Context.MODE_PRIVATE)
+                .edit()
+                .putString(WallpaperStorage.PREF_KEY_IREADER_SKIN_FILE_NAME, fileName)
+                .apply()
+            return runCatching {
+                WallpaperStorage.saveIReaderSkinInTree(this, bitmap, treeUri, fileName)
+                writeDebugLog("ireader_skin_tree_saved")
+                "\nSkin 覆盖: 已覆盖"
+            }.getOrElse {
+                val msg = it.message ?: it.javaClass.simpleName
+                writeDebugLog("ireader_skin_tree_save_failed")
+                "\nSkin 覆盖: 失败 $msg"
+            }
+        }
+        val uri = selectedIReaderSkinUri?.takeIf { it.isNotBlank() } ?: return ""
+        return runCatching {
+            WallpaperStorage.saveIReaderSkin(this, bitmap, uri)
+            writeDebugLog("ireader_skin_saved")
+            "\nSkin 覆盖: 已覆盖"
+        }.getOrElse {
+            val msg = it.message ?: it.javaClass.simpleName
+            writeDebugLog("ireader_skin_save_failed")
+            "\nSkin 覆盖: 失败 $msg"
+        }
+    }
+
+    private fun isIReaderOverwriteSuccess(vararg statusLines: String): Boolean {
+        return statusLines.any { it.contains("已覆盖") }
+    }
+
+    private val pickIReaderCacheLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val uri = result.data?.data
+        if (result.resultCode == android.app.Activity.RESULT_OK && uri != null) {
+            val flags = result.data?.flags ?: 0
+            val persistFlags = flags and (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            var permissionDebug = ""
+            try {
+                val wantedFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                contentResolver.takePersistableUriPermission(uri, if (persistFlags != 0) persistFlags else wantedFlags)
+                permissionDebug = "persist=ok"
+            } catch (e: Exception) {
+                permissionDebug = "persist=fail ${e.javaClass.simpleName}:${e.message}"
+            }
+            selectedIReaderCacheUri = uri.toString()
+            getSharedPreferences("wallpaper_settings", Context.MODE_PRIVATE)
+                .edit()
+                .putString(WallpaperStorage.PREF_KEY_IREADER_CACHE_URI, selectedIReaderCacheUri)
+                .apply()
+            if (::iReaderCacheText.isInitialized) iReaderCacheText.text = iReaderCacheLabel()
+            changeStateText.text = "状态: 已选择掌阅缓存文件（$permissionDebug）"
+            writeDebugLog("ireader_cache_selected")
+        }
+    }
+
+    private val pickIReaderSkinLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val uri = result.data?.data
+        if (result.resultCode == android.app.Activity.RESULT_OK && uri != null) {
+            val flags = result.data?.flags ?: 0
+            val persistFlags = flags and (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            var permissionDebug = ""
+            try {
+                val wantedFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                contentResolver.takePersistableUriPermission(uri, if (persistFlags != 0) persistFlags else wantedFlags)
+                permissionDebug = "persist=ok"
+            } catch (e: Exception) {
+                permissionDebug = "persist=fail ${e.javaClass.simpleName}:${e.message}"
+            }
+            selectedIReaderSkinUri = uri.toString()
+            getSharedPreferences("wallpaper_settings", Context.MODE_PRIVATE)
+                .edit()
+                .putString(WallpaperStorage.PREF_KEY_IREADER_SKIN_URI, selectedIReaderSkinUri)
+                .apply()
+            if (::iReaderSkinText.isInitialized) iReaderSkinText.text = iReaderSkinLabel()
+            changeStateText.text = "状态: 已选择 Skin 文件（$permissionDebug）"
+            writeDebugLog("ireader_skin_selected")
+        } else {
+            changeStateText.text = "状态: 未选择 Skin 文件"
+            writeDebugLog("ireader_skin_select_empty")
+        }
     }
 
     private fun dumpTextTree(view: View, maxItems: Int = 80): String {
@@ -2774,6 +3019,10 @@ class MainActivity : ComponentActivity() {
                     .append(", bodyFont=").append(s.bodyFont)
                     .append('\n')
                 w.append("lastSavedPath=").append(lastSavedPath ?: "<null>").append('\n')
+                w.append("iReaderCacheUri=").append(selectedIReaderCacheUri ?: "<null>").append('\n')
+                w.append("iReaderSkinUri=").append(selectedIReaderSkinUri ?: "<null>").append('\n')
+                w.append("iReaderSkinTreeUri=").append(selectedIReaderSkinTreeUri ?: "<null>").append('\n')
+                w.append("iReaderSkinFileName=").append(if (::iReaderSkinFileNameInput.isInitialized) iReaderSkinFileNameInput.text.toString() else "<null>").append('\n')
                 w.append("fontCount=").append(systemFonts.size.toString()).append('\n')
                 w.append('\n')
                 w.append("uiDebugReport=").append('\n').append(uiDebugReport.ifBlank { "<empty>" }).append('\n')
